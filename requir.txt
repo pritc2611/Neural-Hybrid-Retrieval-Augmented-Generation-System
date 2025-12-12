@@ -7,3 +7,4 @@ langchain-classic
 langchain-huggingface
 pinecone
 pinecone-text
+uvicorn
