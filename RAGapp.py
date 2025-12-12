@@ -292,7 +292,7 @@ async def lifespan(app: FastAPI):
     from langchain_classic.document_loaders import TextLoader
     
     step_start = time.time()
-    text_loader = TextLoader("D:\\AI\\texts.text")
+    text_loader = TextLoader("texts.text")
     text_loaded = text_loader.load()
     chunks = get_chunks_format_text(text_loaded)
     print(f"✅ Loaded {len(chunks)} chunks in {time.time() - step_start:.2f}s")

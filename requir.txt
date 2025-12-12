@@ -8,3 +8,8 @@ langchain-huggingface
 pinecone
 pinecone-text
 uvicorn[standard]
+langchain_community
+jinja2
+python-multipart
+pymongo
+redis

@@ -1,7 +1,7 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM , AutoModel
-import torch.nn.functional as F
+# from transformers import AutoTokenizer, AutoModelForCausalLM , AutoModel
+# import torch.nn.functional as F
 from langchain_core.runnables import RunnableLambda
-import torch
+# import torch
 from langchain_community.retrievers import PineconeHybridSearchRetriever
 from langchain_core.documents import Document
 from pinecone_text.sparse import BM25Encoder
