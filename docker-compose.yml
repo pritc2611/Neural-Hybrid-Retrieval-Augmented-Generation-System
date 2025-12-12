@@ -3,10 +3,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rag_app
+    image: RAGapp
     container_name: ragcontainer
     ports:
       - "8000:8000"
+    depends_on:
+      - redis_db
+      - mongo_db
     networks:
       - rag_network
 
