@@ -5,7 +5,7 @@ RUN pip install --no-cache-dir -r requir.txt
 
 FROM python:3.10-slim
 WORKDIR /rag_app
-COPY D:\RAGend-to-end .
+COPY . .
 
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "RAGapp:app", "--host", "0.0.0.0", "--port", "8000"]
