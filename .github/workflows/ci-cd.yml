@@ -1,0 +1,41 @@
+name: Rag Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-letest
+
+    steps:
+      - name: checking codes
+        uses : action/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name:
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requir.txt
+
+      - name: building docker image
+        run: |
+          docker compose up --build -d
+
+      - name: checking secrets are present
+        run: |
+          if [ -z "${{ secrets.DOCKER_USERNAME }}" ]; then echo "DOCKER_USERNAME is missing"; fi
+          if [ -z "${{ secrets.DOCKER_PASSWORD }}" ]; then echo "DOCKER_PASSWORD is missing"; fi
+
+      - name: login to docker Hub
+        user: docker/login-action@v2
+        with:
+          username: ${{secrets.DOCKER_USERNAME}}
+          password: ${{secrets.DOCKER_PASSWORD}}
+
+      - name : push docker image
+        run: |
+          docker tag RAGapp:latest ${{ secrets.DOCKER_USERNAME }}/RAGapp:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/RAGapp:latest

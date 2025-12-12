@@ -1,0 +1,16 @@
+time
+io
+traceback
+jaon
+re
+pathlib
+contextlib
+fastapi
+markdown
+dotenv
+pypdf
+langchain_classic
+langchain_core
+pinecone
+langchain_huggingface
+pinecone_text

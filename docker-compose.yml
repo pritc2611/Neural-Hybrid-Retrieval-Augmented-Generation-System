@@ -1,0 +1,49 @@
+services:
+  rag_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rag_app
+    container_name: ragcontainer
+    ports:
+      - "8000:8000"
+    networks:
+      - rag_network
+
+  redis_db:
+    image: redis:latest
+    container_name: redis_db
+    restart: always
+    environment:
+      REDIS_PASSWORD: redissecret
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - rag_network
+
+  mongo_db:
+    image: mongo:latest
+    container_name: mongo_db
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: secret
+      MONGO_INITDB_DATABASE: ragdb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      - mongo_config:/data/configdb
+    networks:
+      - rag_network
+
+volumes:
+  mongo_data:
+  mongo_config:
+  redis_data:
+
+networks:
+  rag_network:
+    driver: bridge

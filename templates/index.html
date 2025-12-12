@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🧠 RAG Chatbot</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Highlight.js for code syntax highlighting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+
+<div class="page">
+    <!-- Sidebar -->
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h2>🧠 RAG Chatbot</h2>
+            <button class="theme-toggle" id="theme-toggle" title="Toggle Dark Mode">
+                <span class="theme-icon">🌙</span>
+            </button>
+        </div>
+
+        <button class="new-chat-btn" id="new-chat-btn">
+            <span>➕</span> New Chat
+        </button>
+
+        <div class="stats-panel">
+            <h3>📊 Statistics</h3>
+            <div class="stat-item">
+                <span class="stat-label">Messages:</span>
+                <span class="stat-value">{{ chat_history|length }}</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Startup:</span>
+                <span class="stat-value">{{ startup_time if startup_time else 'N/A' }}</span>
+            </div>
+            {% if latency %}
+            <div class="stat-item">
+                <span class="stat-label">Last Response:</span>
+                <span class="stat-value">{{ latency }}</span>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="history">
+            <h3>💬 Recent Chats</h3>
+            <ul id="chat-history-list">
+                {% set user_messages = chat_history | selectattr("type", "equalto", "user") | list %}
+                {% for message in user_messages[-5:] %}
+                <li class="history-item" title="{{ message.content }}">
+                    <span class="history-icon">💭</span>
+                    <span class="history-text">{{ message.content[:30] }}{% if message.content|length > 30 %}...{% endif %}</span>
+                </li>
+                {% endfor %}
+                {% if not user_messages %}
+                <li class="empty-history">No chats yet</li>
+                {% endif %}
+            </ul>
+        </div>
+
+        <div class="sidebar-footer">
+            <button class="action-btn" id="clear-history-btn" title="Clear all chat history">
+                🗑️ Clear History
+            </button>
+            <button class="action-btn" id="stats-btn" title="View detailed statistics">
+                📈 View Stats
+            </button>
+        </div>
+    </div>
+
+    
+
+    <!-- Main Chat Area -->
+    <div class="chat-container" id="chat-container">
+        <!-- Chat Header -->
+        <div class="chat-header">
+            <button class="sidebar-toggle" id="sidebar-toggle">
+                <span id="toggle-icon">☰</span>
+            </button>
+            <h1>RAG Assistant</h1>
+            <div class="header-actions">
+                <button class="icon-btn" id="export-btn" title="Export chat">📥</button>
+                <button class="icon-btn" id="settings-btn" title="Settings">⚙️</button>
+            </div>
+        </div>
+
+        <!-- Chat Window -->
+        <div class="chat-window" id="chat-window">
+            {% if not chat_history %}
+            <!-- Welcome Screen -->
+            <div class="welcome-screen">
+                <div class="welcome-icon">🚀</div>
+                <h2>Welcome to RAG Chatbot!</h2>
+                <p>Ask me anything </p>
+                <div class="welcome-examples">
+                    <div class="example-card" onclick="document.getElementById('question').value='What is this document about?'; document.getElementById('question').focus();">
+                        <span class="example-icon">📄</span>
+                        <span>What is this document about?</span>
+                    </div>
+                    <div class="example-card" onclick="document.getElementById('question').value='Summarize the main points'; document.getElementById('question').focus();">
+                        <span class="example-icon">📝</span>
+                        <span>Summarize the main points</span>
+                    </div>
+                    <div class="example-card" onclick="document.getElementById('question').value='Explain in detail'; document.getElementById('question').focus();">
+                        <span class="example-icon">🔍</span>
+                        <span>Explain in detail</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Existing Messages -->
+            {% for message in chat_history %}
+                {% if message.type == "user" %}
+                <div class="msg-row user-row">
+                    <div class="bubble user-bubble">
+                        <div class="message-content">{{ message.content }}</div>
+                    </div>
+                    <div class="avatar user-avatar">👤</div>
+                </div>
+                {% else %}
+                <div class="msg-row bot-row">
+                    <div class="avatar bot-avatar"><img src="https://images.emojiterra.com/google/noto-emoji/animated-emoji/1f916.gif"></div>
+                    <div class="bubble bot-bubble">
+                        <div class="message-content markdown-content">{{ message.content | safe }}</div>
+                        <div class="message-actions">
+                            <button class="msg-action-btn copy-btn" title="Copy message">📋</button>
+                            <button class="msg-action-btn like-btn" title="Good response">👍</button>
+                            <button class="msg-action-btn dislike-btn" title="Bad response">👎</button>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            {% endfor %}
+
+            {% if error %}
+            <div class="error-message">
+                <strong>⚠️ Error:</strong> {{ error }}
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Typing Indicator -->
+        <div id="typing-wrapper">
+    <div class="msg-row bot-row typing-row" id="typing-indicator" style="display:none;">
+        <div class="avatar bot-avatar"><img src="https://images.emojiterra.com/google/noto-emoji/animated-emoji/1f916.gif"></div>
+        <div class="bubble bot-bubble typing-bubble">
+            <span class="dot"></span>
+            <span class="dot"></span>
+            <span class="dot"></span>
+        </div>
+    </div>
+</div>
+
+
+
+
+<!-- Input Bar -->
+<div class="input-container">
+    <form id="chat-form" class="input-bar" enctype="multipart/form-data">
+
+        <!-- Hidden file input -->
+        <input type="file" id="fileInput" name="file" style="display:none;" />
+
+        <!-- Attachment Button -->
+        <button type="button" id="attachBtn" class="icon-btn" title="Attach a file"> 🖇️ </button>
+
+        <!-- User Message Input -->
+        <input 
+            type="text" 
+            name="question" 
+            id="question" 
+            placeholder="Send a message..." 
+            autocomplete="off"
+            required
+        >
+
+        <!-- Send Button -->
+        <button type="submit" id="send-btn" class="send-btn">
+            ➤
+        </button>
+    </form>
+
+    <div class="input-footer">
+        <span class="char-count" id="char-count">0</span>
+        <span class="shortcuts-hint">
+            Press <kbd>Enter</kbd> to send • <kbd>Shift+Enter</kbd> for new line
+        </span>
+    </div>
+</div>
+
+
+<!-- Scripts -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+<script>
+// ============================================================================
+// GLOBAL VARIABLES
+// ============================================================================
+const chatWindow = document.getElementById("chat-window");
+const typingIndicator = document.getElementById("typing-indicator");
+const chatForm = document.getElementById("chat-form");
+const questionInput = document.getElementById("question");
+const sendBtn = document.getElementById("send-btn");
+const charCount = document.getElementById("char-count");
+const sidebar = document.getElementById("sidebar");
+const sidebarToggle = document.getElementById("sidebar-toggle");
+const toggleIcon = document.getElementById("toggle-icon");
+const themeToggle = document.getElementById("theme-toggle");
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+function scrollToBottom(smooth = true) {
+    chatWindow.scrollTo({
+        top: chatWindow.scrollHeight,
+        behavior: smooth ? 'smooth' : 'auto'
+    });
+}
+
+function showTypingIndicator() {
+    typingIndicator.style.display = "flex";
+    scrollToBottom();
+}
+
+function hideTypingIndicator() {
+    typingIndicator.style.display = "none";
+}
+
+function disableInput(disabled = true) {
+    questionInput.disabled = disabled;
+    sendBtn.disabled = disabled;
+    if (disabled) {
+        sendBtn.innerHTML = '<span class="send-icon spinning">⏳</span>';
+    } else {
+        sendBtn.innerHTML = '<span class="send-icon">➤</span>';
+    }
+}
+
+//===========================================================================
+//   FILE UPLODE FOR RETRIVE
+//============================================================================
+
+const attachBtn = document.getElementById("attachBtn");
+const fileInput = document.getElementById("fileInput");
+
+// When user clicks 📎, open file picker
+attachBtn.addEventListener("click", () => {
+    fileInput.click();
+});
+
+// Auto-upload when file selected
+fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    // Create form data
+    const formData = new FormData();
+    formData.append("file", file);
+
+    // Show notification
+    showNotification("📤 Uploading file...");
+
+    try {
+        const response = await fetch("/upload", {
+            method: "POST",
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            showNotification("❌ " + data.error);
+            return;
+        }
+
+        showNotification(`✅ Uploaded ${data.filename} • ${data.chunks} chunks`);
+
+    } catch (err) {
+        showNotification("❌ Upload failed");
+    }
+});
+
+
+// ============================================================================
+// MESSAGE RENDERING
+// ============================================================================
+function createMessageElement(content, sender = "bot") {
+    const row = document.createElement("div");
+    row.classList.add("msg-row", sender === "user" ? "user-row" : "bot-row");
+
+    // Avatar
+const avatar = document.createElement("div");
+avatar.classList.add("avatar", sender === "user" ? "user-avatar" : "bot-avatar");
+
+const img = document.createElement("img");
+img.src = sender === "user"
+? "https://path-to-user-icon.png"
+: "https://images.emojiterra.com/google/noto-emoji/animated-emoji/1f916.gif"; // bot avatar GIF
+img.style.width = "40px";   // constrain size
+img.style.height = "40px";
+img.style.borderRadius = "50%";
+avatar.appendChild(img);
+
+    // Bubble
+    const bubble = document.createElement("div");
+    bubble.classList.add("bubble", sender === "user" ? "user-bubble" : "bot-bubble");
+
+    const messageContent = document.createElement("div");
+    messageContent.classList.add("message-content");
+    if (sender === "bot") {
+        messageContent.classList.add("markdown-content");
+    }
+    messageContent.textContent = content;
+
+    bubble.appendChild(messageContent);
+
+    // Add message actions for bot messages
+    if (sender === "bot") {
+        const actions = document.createElement("div");
+        actions.classList.add("message-actions");
+        actions.innerHTML = `
+            <button class="msg-action-btn copy-btn" title="Copy message">📋</button>
+            <button class="msg-action-btn like-btn" title="Good response">👍</button>
+            <button class="msg-action-btn dislike-btn" title="Bad response">👎</button>
+        `;
+        bubble.appendChild(actions);
+        
+        // Add event listeners
+        actions.querySelector('.copy-btn').addEventListener('click', () => copyMessage(messageContent.textContent));
+        actions.querySelector('.like-btn').addEventListener('click', (e) => handleFeedback(e, 'like'));
+        actions.querySelector('.dislike-btn').addEventListener('click', (e) => handleFeedback(e, 'dislike'));
+    }
+
+    // Assemble
+    if (sender === "user") {
+        row.appendChild(bubble);
+        row.appendChild(avatar);
+    } else {
+        row.appendChild(avatar);
+        row.appendChild(bubble);
+    }
+
+    return row;
+}
+
+function renderMarkdown(element) {
+    const rawText = element.textContent;
+    element.innerHTML = marked.parse(rawText);
+    
+    // Highlight code blocks
+    element.querySelectorAll("pre code").forEach((block) => {
+        hljs.highlightElement(block);
+    });
+}
+
+async function streamMessage(content, messageElement) {
+    const contentElement = messageElement.querySelector('.message-content');
+    let index = 0;
+    
+    return new Promise((resolve) => {
+        const interval = setInterval(() => {
+            if (index >= content.length) {
+                clearInterval(interval);
+                // Render final markdown
+                contentElement.textContent = content;
+                renderMarkdown(contentElement);
+                scrollToBottom();
+                resolve();
+                return;
+            }
+            
+            contentElement.textContent = content.slice(0, index + 1) + "▌";
+            if (index % 10 === 0) scrollToBottom(); // Scroll periodically
+            index++;
+        }, 20); // Adjust speed here
+    });
+}
+
+// ============================================================================
+// FORM SUBMISSION
+// ============================================================================
+chatForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    
+    const question = questionInput.value.trim();
+    if (!question) return;
+
+    // Add user message
+    const userMsg = createMessageElement(question, "user");
+    chatWindow.appendChild(userMsg);
+    scrollToBottom();
+
+    // Clear input
+    questionInput.value = "";
+    updateCharCount();
+    disableInput(true);
+    showTypingIndicator();
+
+    try {
+        // Send JSON to backend
+        const response = await fetch("/chat", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ question })
+        });
+
+        const data = await response.json();
+
+        hideTypingIndicator();   // <-- IMPORTANT FIX
+
+        if (data.error) {
+            const errorMsg = createMessageElement(`⚠️ ${data.error}`, "bot");
+            chatWindow.appendChild(errorMsg);
+            return;
+        }
+
+        // Create bot message bubble
+        const botMsg = createMessageElement("", "bot");
+        chatWindow.appendChild(botMsg);
+
+        // Stream plain text (remove HTML tags)
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = data.answer;
+        const plainText = tempDiv.textContent;
+
+        await streamMessage(plainText, botMsg);
+
+        // Replace streamed text with rendered markdown
+        const contentEl = botMsg.querySelector(".message-content");
+        contentEl.innerHTML = data.answer;
+        renderMarkdown(contentEl);
+
+        scrollToBottom();
+
+    } catch (error) {
+        hideTypingIndicator();   // <-- IMPORTANT FIX
+
+        const errorMsg = createMessageElement(
+            `❌ Error: ${error.message}`,
+            "bot"
+        );
+        chatWindow.appendChild(errorMsg);
+
+    } finally {
+        disableInput(false);
+        questionInput.focus();
+    }
+});
+
+// ============================================================================
+// INPUT ENHANCEMENTS
+// ============================================================================
+function updateCharCount() {
+    const length = questionInput.value.length;
+    charCount.textContent = `${length}`;
+    
+    if (length > 450) {
+        charCount.style.color = '#ef4444';
+    } else if (length > 400) {
+        charCount.style.color = '#f59e0b';
+    } else {
+        charCount.style.color = '';
+    }
+}
+
+questionInput.addEventListener('input', updateCharCount);
+
+// Handle Shift+Enter for new line
+questionInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.shiftKey) {
+        e.preventDefault();
+        const start = questionInput.selectionStart;
+        const end = questionInput.selectionEnd;
+        questionInput.value = questionInput.value.substring(0, start) + "\n" + questionInput.value.substring(end);
+        questionInput.selectionStart = questionInput.selectionEnd = start + 1;
+        updateCharCount();
+    }
+});
+
+// ============================================================================
+// MESSAGE ACTIONS
+// ============================================================================
+function copyMessage(text) {
+    navigator.clipboard.writeText(text).then(() => {
+        showNotification('✅ Copied to clipboard!');
+    }).catch(() => {
+        showNotification('❌ Failed to copy');
+    });
+}
+
+function handleFeedback(e, type) {
+    const btn = e.target;
+    const allBtns = btn.parentElement.querySelectorAll('.msg-action-btn');
+    
+    // Toggle active state
+    if (btn.classList.contains('active')) {
+        btn.classList.remove('active');
+    } else {
+        allBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+    }
+    
+    showNotification(`${type === 'like' ? '👍' : '👎'} Feedback recorded`);
+    
+    // You can send feedback to backend here
+    // fetch('/feedback', { method: 'POST', body: JSON.stringify({ type }) });
+}
+
+// ============================================================================
+// SIDEBAR CONTROLS
+// ============================================================================
+sidebarToggle.addEventListener('click', () => {
+    sidebar.classList.toggle('collapsed');
+    toggleIcon.textContent = sidebar.classList.contains('collapsed') ? '☰' : '✕';
+});
+
+themeToggle.addEventListener('click', () => {
+    document.body.classList.toggle('dark-mode');
+    const icon = themeToggle.querySelector('.theme-icon');
+    icon.textContent = document.body.classList.contains('dark-mode') ? '☀️' : '🌙';
+    localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
+});
+
+// Load saved theme
+if (localStorage.getItem('theme') === 'dark') {
+    document.body.classList.add('dark-mode');
+    themeToggle.querySelector('.theme-icon').textContent = '☀️';
+}
+
+document.getElementById('new-chat-btn').addEventListener('click', async () => {
+    if (confirm('Start a new chat? This will clear the current conversation.')) {
+        const response = await fetch('/clear-history', { method: 'POST' });
+        if (response.ok) {
+            window.location.reload();
+        }
+    }
+});
+
+document.getElementById('clear-history-btn').addEventListener('click', async () => {
+    if (confirm('Clear all chat history? This cannot be undone.')) {
+        const response = await fetch('/clear-history', { method: 'POST' });
+        if (response.ok) {
+            window.location.reload();
+        }
+    }
+});
+
+document.getElementById('stats-btn').addEventListener('click', async () => {
+    const response = await fetch('/stats');
+    const data = await response.json();
+    
+    alert(`📊 Application Statistics
+
+⏱️ Startup Time: ${data.startup_time}
+💾 Cache: ${data.cache_enabled ? 'Enabled ⚡' : 'Disabled'}
+
+💬 Chat History:
+  • Total: ${data.chat_history.total_messages}
+  • Your messages: ${data.chat_history.user_messages}
+  • Bot responses: ${data.chat_history.bot_messages}
+
+🔍 Query Cache: ${data.query_cache.size} cached`);
+});
+
+document.getElementById('export-btn').addEventListener('click', () => {
+    // Export chat as text
+    const messages = Array.from(document.querySelectorAll('.msg-row'));
+    const text = messages.map(msg => {
+        const isUser = msg.classList.contains('user-row');
+        const content = msg.querySelector('.message-content').textContent;
+        return `${isUser ? 'You' : 'Bot'}: ${content}`;
+    }).join('\n\n');
+    
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `chat-${new Date().toISOString().slice(0,10)}.txt`;
+    a.click();
+    
+    showNotification('✅ Chat exported!');
+});
+
+// ============================================================================
+// NOTIFICATIONS
+// ============================================================================
+function showNotification(message, duration = 2000) {
+    const notification = document.createElement('div');
+    notification.className = 'notification';
+    notification.textContent = message;
+    document.body.appendChild(notification);
+    
+    setTimeout(() => notification.classList.add('show'), 10);
+    setTimeout(() => {
+        notification.classList.remove('show');
+        setTimeout(() => notification.remove(), 300);
+    }, duration);
+}
+
+
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+window.addEventListener('load', () => {
+    scrollToBottom(false);
+    questionInput.focus();
+    
+    // Render any existing markdown
+    document.querySelectorAll('.markdown-content').forEach(el => {
+        renderMarkdown(el);
+    });
+});
+
+// Auto-scroll on window resize
+window.addEventListener('resize', () => scrollToBottom(false));
+</script>
+
+</body>
+</html>
