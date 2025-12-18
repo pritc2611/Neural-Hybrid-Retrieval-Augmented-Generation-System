@@ -25,7 +25,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker compose -d --build .
+          docker compose --build .
 
       - name: Check required secrets
         run: |
