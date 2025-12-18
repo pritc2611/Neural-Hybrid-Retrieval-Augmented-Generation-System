@@ -3,8 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rag_application
-    container_name: ragcontainer
+    image: rag_app
+    container_name: rag_c
     ports:
       - "8000:8000"
 
