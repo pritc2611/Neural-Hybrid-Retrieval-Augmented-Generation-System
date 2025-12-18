@@ -1,17 +1,18 @@
 FROM python:3.10-slim
 
-# Set working directory
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_DEFAULT_TIMEOUT=100
+
 WORKDIR /rag_app
 
-# Copy and install dependencies first
 COPY requir.txt .
-RUN pip install --no-cache-dir -r requir.txt
 
-# Copy application source code
+RUN pip install --upgrade pip \
+ && pip install --no-cache-dir --timeout 100 -r requir.txt
+
 COPY . .
 
-# Expose port
 EXPOSE 8000
 
-# Run the app
-CMD ["uvicorn", "RAGapp:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "rag_app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -19,6 +19,7 @@ import markdown
 from markdown.extensions.tables import TableExtension
 from markdown.extensions.fenced_code import FencedCodeExtension
 from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 load_dotenv()
 # =============================================================================
@@ -29,7 +30,6 @@ chat_llm = None
 embed_llm = None
 pc_retriver = None
 pc_index = None
-final_chain = None
 text_splitter = None
 sparser_encode = None  # Global BM25 encoder
 startup_time = 0
@@ -51,6 +51,9 @@ TOP_K_RETRIEVAL = 4
 HF_TOKEN = os.getenv("HF_TOKEN")
 PINECONE_KEY = os.getenv("PINECONE_API_KEY")
 Mongo_Url = os.getenv("MONGO_URL")
+EMBED_MODEL_PATH = os.getenv("EMBEDMODEL")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
 
 # =============================================================================
 # MONGODB & REDIS SETUP
@@ -70,7 +73,7 @@ def init_storage():
         print("✅ MongoDB connected")
         
         # Redis
-        redis_client = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+        redis_client = redis.Redis(host="redis_db", port=6379, db=0, decode_responses=True)
         redis_client.ping()  # Test connection
         print("✅ Redis connected")
         
@@ -80,6 +83,15 @@ def init_storage():
         # Fallback to in-memory
         collection = None
         redis_client = None
+
+def extract_answer(user_query, model_output):
+    uq = user_query.strip().lower()
+    out = model_output.strip()
+    if uq in out.lower():
+        idx = out.lower().find(uq) + len(uq) + 1
+        out = out[idx:].strip()
+
+    return out
 
 # =============================================================================
 # STORAGE HELPER FUNCTIONS
@@ -203,63 +215,85 @@ def get_chunks_format_text(text):
 # MODEL INFERENCE
 # =============================================================================
 async def async_model(question: str, session_id: str = "default") -> str:
-    """Run model inference with conversation context."""
     print(f"🔍 Processing: {question[:50]}...")
     start = time.time()
-    
-    # Get conversation history
-    conversation_history = get_conversation_context(session_id, include_mongo=True)
-    print("converstation history:\n",conversation_history)
-    # Format context
-    context_text = format_context_for_model(conversation_history)
-    print("formated history:\n",context_text)
-    # Build full prompt
-    full_question = f"{context_text}Current question: {question}"
-    print(full_question)
-    print(query_cache)
-    cache_key = question.strip()
-    print("q",question)
-    print("c",cache_key)
 
+    conversation_history = get_conversation_context(session_id, include_mongo=True)
+    context_text = format_context_for_model(conversation_history)
+
+    cache_key = question.strip()
     if cache_key in query_cache:
-        print(f"✅ Cache hit")
+        print("✅ Cache hit")
         return query_cache[cache_key]
-    else:
-        response = await run_in_threadpool(final_chain.invoke, full_question)
-        print(response)
-        query_cache[cache_key] = response
-        elapsed = time.time() - start
-        print(f"✅ Response in {elapsed:.2f}s")
+
+    print("🚀 Invoking RAG chain")
     
-    return response
+    try:
+        response = await run_in_threadpool(final_chain.invoke,{"question": question,"chat_history": context_text})
+        print(response)
+        answer = extract_answer(question, response)
+        query_cache[cache_key] = answer
+        print(f"✅ Response in {time.time() - start:.2f}s")
+        return answer
+    except Exception as e:
+        print("❌ /chat error:")
+        traceback.print_exc()
+        return JSONResponse(
+            {"error": f"An error occurred: {str(e)}"},
+            status_code=500
+        )
+
+
 
 # =============================================================================
 # CUSTOM PINECONE RETRIEVER
 # =============================================================================
+
 from langchain_classic.retrievers import PineconeHybridSearchRetriever
 from langchain_core.documents import Document
 class CPineconeHybridRetriever(PineconeHybridSearchRetriever):
     def _get_relevant_documents(self, query, run_manager=None, **kwargs):
-        dense_vec = self.embeddings.embed_query(query)
+        if isinstance(query, dict):
+            # When coming from RunnableParallel, query contains the full context
+            actual_query = query.get("question", str(query))
+        else:
+            actual_query = str(query)
         
-        sparse_vec = self.sparse_encoder.encode_queries(query)
+        print(f"🔍 Query type: {type(query)}, Extracted: {actual_query[:100]}")
+
+        dense_vec = self.embeddings.embed_query(actual_query)
+        
 
         # 🔥 FIX: If sparse vector is empty, remove it
-        if len(sparse_vec["indices"]) == 0:
+        try:
+            sparse_vec = self.sparse_encoder.encode_queries(actual_query)
+            
+            # FIX 2: Handle empty sparse vectors properly
+            if sparse_vec and len(sparse_vec.get("indices", [])) == 0:
+                print("⚠️ Empty sparse vector, using dense only")
+                sparse_vec = None
+        except Exception as e:
+            print(f"⚠️ Sparse encoding failed: {e}, falling back to dense only")
             sparse_vec = None
+
 
         result = self.index.query(
             vector=dense_vec,
             sparse_vector=sparse_vec,
             top_k=self.top_k,
             include_metadata=True,
-            namespace=self.namespace,
-        )
+            namespace="__default__",)
 
         docs = []
         for m in result.matches:
             docs.append(Document(page_content=m.metadata.get("context",""),metadata={"score":m.score}))
         return docs
+
+def extract_question(input_dict):
+    """Extract just the question from the input"""
+    if isinstance(input_dict, dict):
+      return input_dict.get("question", str(input_dict))
+    return str(input_dict)
 
 
 # =============================================================================
@@ -311,28 +345,45 @@ async def lifespan(app: FastAPI):
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace, HuggingFaceEndpointEmbeddings
+    from transformers import AutoTokenizer , AutoModelForCausalLM
+    from sentence_transformers import SentenceTransformer
     print(f"✅ Libraries imported in {time.time() - step_start:.2f}s")
     
     # Setup HuggingFace
-    print("\n⏱️ Connecting to HuggingFace...")
+    print("\n⏱️ loading models ...")
     step_start = time.time()
     
-    llm = HuggingFaceEndpoint(
-        repo_id="openai/gpt-oss-20b",
-        huggingfacehub_api_token=HF_TOKEN,
-        max_new_tokens=1000,
-        temperature=0.9,
-        timeout=20,
-    )
-    chat_llm = ChatHuggingFace(llm=llm)
+    from langchain.embeddings.base import Embeddings
+    from transformers import pipeline
+    from langchain_huggingface import HuggingFacePipeline
+    class SentenceTransformerEmbeddings(Embeddings):
+        def __init__(self, model):
+            self.model = model
+
+        def embed_documents(self, texts):
+            return self.model.encode(
+                texts,
+                convert_to_numpy=True,
+                normalize_embeddings=True
+                ).tolist()
+
+        def embed_query(self, text):
+            return self.model.encode(
+                [text],
+                convert_to_numpy=True,
+                normalize_embeddings=True
+                )[0].tolist()
+
     
-    embed_llm = HuggingFaceEndpointEmbeddings(
-        repo_id="sentence-transformers/all-MiniLM-L6-v2",
-        huggingfacehub_api_token=HF_TOKEN
-    )
-    print(f"✅ HuggingFace ready in {time.time() - step_start:.2f}s")
-    
-    # Setup Pinecone
+    embed_llm = SentenceTransformer(EMBED_MODEL_PATH)
+    print(embed_llm.get_sentence_embedding_dimension() > 0)
+    embedder = SentenceTransformerEmbeddings(model=embed_llm)
+    print("✅ embedding model loaded")
+
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash",google_api_key=GOOGLE_API_KEY)
+    print("✅ text model loaded")
+    print(f"✅ text model ready in {time.time() - step_start:.2f}s")
+
     print("\n⏱️ Setting up Pinecone...")
     step_start = time.time()
     
@@ -340,7 +391,7 @@ async def lifespan(app: FastAPI):
     pc_index = pinecone_storage.Index("rag-endtoend")
     
     pc_retriver = CPineconeHybridRetriever(
-        embeddings=embed_llm,
+        embeddings=embedder,
         index=pc_index,
         top_k=TOP_K_RETRIEVAL,
         sparse_encoder=sparser_encode
@@ -366,18 +417,22 @@ async def lifespan(app: FastAPI):
          - For long answers (>200 words), add a brief summary
          - Cite specific information from context when using it"""),
          
-         
-         ("user", """Retrieved Context:
-          {rag_context}
-          
-          {question}""")])
+          ("""Previous Conversation:
+             {chat_history}
+
+             Retrieved Context:
+                {rag_context}
+
+             Question:
+               {question}""")])
+
     
     parellal_runnable = RunnableParallel({
-        "rag_context": pc_retriver | RunnableLambda(get_chunks_format_text),
-        "question": RunnablePassthrough(),
-    })
+    "rag_context": RunnableLambda(extract_question) | pc_retriver | RunnableLambda(get_chunks_format_text),
+    "chat_history": RunnablePassthrough(),
+    "question": RunnablePassthrough()})
     parser = StrOutputParser()
-    final_chain = parellal_runnable | prompt | chat_llm | parser
+    final_chain = parellal_runnable | prompt | llm | parser
     
     print(f"✅ RAG chain ready in {time.time() - step_start:.2f}s")
     
@@ -520,6 +575,7 @@ async def upload_file(file: UploadFile = File(...)):
         from pinecone_text.sparse import BM25Encoder
         all_chunks = chunks  # In production, combine with existing
         sparser_encode = BM25Encoder().fit(all_chunks)
+        pc_retriver.sparse_encoder = sparser_encode
         print(f"✅ BM25 encoder updated")
         
         elapsed = time.time() - start
