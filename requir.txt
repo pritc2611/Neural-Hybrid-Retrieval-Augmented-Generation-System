@@ -13,7 +13,6 @@ jinja2
 python-multipart
 pymongo
 redis
-transformers
 sentence-transformers
 pinecone
 langchain_google_genai
