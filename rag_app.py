@@ -180,16 +180,25 @@ def format_context_for_model(messages: list) -> str:
 # TEXT PROCESSING FUNCTIONS
 # =============================================================================
 def extract_text_from_file(filename: str, data: bytes) -> str:
-    """Extract text from uploaded files (PDF or TXT)."""
-    if filename.endswith(".pdf"):
+    """Extract text from uploaded files (PDF or text-based files)."""
+
+    if filename.lower().endswith(".pdf"):
         from pypdf import PdfReader
+
         reader = PdfReader(io.BytesIO(data))
         text = ""
+
         for page in reader.pages:
-            text += page.extract_text() + "\n"
+            page_text = page.extract_text()
+            if page_text:  # avoid None
+                text += page_text + "\n"
+
         return text
-    elif filename.endswith(".txt"):
-        return data.decode("utf-8", errors="ignore")
+
+    # handle ANY text-based file, not just .txt
+    elif filename.lower().endswith((".txt", ".md", ".csv", ".json", ".log", ".xml")):
+        return data.decode("utf-8")
+
     else:
         raise ValueError(f"Unsupported file type: {filename}")
 
@@ -215,7 +224,6 @@ def get_chunks_format_text(text):
 # =============================================================================
 async def async_model(question: str, session_id: str = "default") -> str:
     print(f"🔍 Processing: {question[:50]}...")
-    start = time.time()
 
     conversation_history = get_conversation_context(session_id, include_mongo=True)
     context_text = format_context_for_model(conversation_history)
@@ -225,22 +233,29 @@ async def async_model(question: str, session_id: str = "default") -> str:
         print("✅ Cache hit")
         return query_cache[cache_key]
 
-    print("🚀 Invoking RAG chain")
-    
     try:
-        response = await run_in_threadpool(final_chain.invoke,{"question": question,"chat_history": context_text})
-        print(response)
+        start = time.time()
+        response = await run_in_threadpool(
+            final_chain.invoke,
+            {"question": question, "chat_history": context_text}
+        )
+        print(f"✅ Response from model in {time.time() - start:.2f}s")
+
         answer = extract_answer(question, response)
+
+        # GUARANTEE string output
+        if not isinstance(answer, str):
+            answer = str(answer)
+
         query_cache[cache_key] = answer
-        print(f"✅ Response in {time.time() - start:.2f}s")
         return answer
+
     except Exception as e:
         print("❌ /chat error:")
         traceback.print_exc()
-        return JSONResponse(
-            {"error": f"An error occurred: {str(e)}"},
-            status_code=500
-        )
+
+        # ✅ ALWAYS return a STRING
+        return f"An error occurred while generating the response."
 
 
 
@@ -281,7 +296,7 @@ class CPineconeHybridRetriever(PineconeHybridSearchRetriever):
             sparse_vector=sparse_vec,
             top_k=self.top_k,
             include_metadata=True,
-            namespace="__default__",)
+            namespace= new_namespace or "jack-story",)
 
         docs = []
         for m in result.matches:
@@ -301,7 +316,7 @@ def extract_question(input_dict):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all resources on startup."""
-    global llm, chat_llm, embed_llm, pc_retriver, pc_index, final_chain, sparser_encode, startup_time
+    global llm, chat_llm, embed_llm, pc_retriver, pc_index, final_chain, sparser_encode, startup_time , parellal_runnable
     
     start = time.time()
     print("\n" + "="*70)
@@ -313,11 +328,11 @@ async def lifespan(app: FastAPI):
     init_storage()
     
     # Initialize text splitter
-    from langchain_classic.text_splitter import RecursiveCharacterTextSplitter
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP
-    )
+    # from langchain_classic.text_splitter import RecursiveCharacterTextSplitter
+    # text_splitter = RecursiveCharacterTextSplitter(
+    #     chunk_size=CHUNK_SIZE,
+    #     chunk_overlap=CHUNK_OVERLAP
+    # )
     
     # Load data
     print("\n⏱️ Loading data...")
@@ -444,11 +459,11 @@ async def lifespan(app: FastAPI):
     
     # Cleanup
     print("\n🛑 Shutting down...")
-    query_cache.clear()
-    if mongo_client:
-        mongo_client.close()
-    if redis_client:
-        redis_client.close()
+    # query_cache.clear()
+    # if mongo_client:
+    #     mongo_client.close()
+    # if redis_client:
+    #     redis_client.close()
 
 # =============================================================================
 # FASTAPI APPLICATION
@@ -546,10 +561,10 @@ async def chat(request: Request):
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     """Upload and process documents."""
-    global sparser_encode
+    global sparser_encode , new_namespace
     
     try:
-        if not (file.filename.endswith('.pdf') or file.filename.endswith('.txt')):
+        if not (file.filename.endswith('.pdf') or file.filename.endswith('.text')):
             return JSONResponse(
                 {"error": "Only PDF and TXT files are supported"},
                 status_code=400
@@ -567,12 +582,15 @@ async def upload_file(file: UploadFile = File(...)):
         chunks = get_chunks_format_text(text)
         print(f"✅ Created {len(chunks)} chunks")
         
-        # Add to Pinecone
-        pc_retriver.add_texts(chunks)
-        
+        name = os.path.splitext(file.filename)[0]
+        new_namespace = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+        pc_retriver.add_texts(
+               texts=chunks,
+               namespace=new_namespace)
+
         # Re-fit BM25 with new chunks
         from pinecone_text.sparse import BM25Encoder
-        all_chunks = chunks  # In production, combine with existing
+        all_chunks = chunks 
         sparser_encode = BM25Encoder().fit(all_chunks)
         pc_retriver.sparse_encoder = sparser_encode
         print(f"✅ BM25 encoder updated")
@@ -668,3 +686,4 @@ async def clear_cache():
     """Clear query cache."""
     query_cache.clear()
     return {"message": "Cache cleared"}
+    

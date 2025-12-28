@@ -8,7 +8,8 @@ WORKDIR /rag_app
 
 COPY requir.txt .
 
-RUN pip install --upgrade pip \ && pip install --no-cache-dir -r requir.txt
+RUN pip install --upgrade pip \
+    && pip install -r requir.txt
 
 COPY . .
 
