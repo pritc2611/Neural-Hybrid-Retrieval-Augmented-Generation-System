@@ -20,4 +20,4 @@ Pillow
 pymupdf
 transformers
 numpy
-base64
+pybase62
