@@ -16,3 +16,8 @@ redis
 sentence-transformers
 pinecone
 langchain_google_genai
+PIL
+pymupdf
+transformers
+numpy
+base64

@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: rag_application:latest
-    container_name: rag_c
+    container_name: rag_container
     ports:
       - "8000:8000"
 
@@ -15,7 +15,7 @@ services:
       MONGO_HOST: mongo_db
 
     volumes:
-      - "D://llms//model:/models:ro"
+      - "D://llms//model//embeding_llm//clip_model:/models:ro"
 
     depends_on:
       - redis_db

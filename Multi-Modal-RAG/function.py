@@ -1,7 +1,4 @@
 import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-
 import time
 import pickle
 import io
@@ -9,7 +6,8 @@ import traceback
 import json
 import re
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Form, Request, UploadFile, File
+from fastapi import FastAPI, Form, Request, UploadFile, File 
+import numpy as np
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -19,30 +17,20 @@ from markdown.extensions.tables import TableExtension
 from markdown.extensions.fenced_code import FencedCodeExtension
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
-
 load_dotenv()
 # =============================================================================
 # GLOBAL VARIABLES
 # =============================================================================
-llm = None
-chat_llm = None
-embed_llm = None
-pc_retriver = None
-pc_index = None
-text_splitter = None
-sparser_encode = None  # Global BM25 encoder
-startup_time = 0
 query_cache = {}
-
-# MongoDB & Redis
-mongo_client = None
+# mongo_clients = mongo_client
+# redis_clients = redis_client
 db = None
 collection = None
-redis_client = None
+
 
 # Configuration
-MAX_SHORT_MEMORY = 5        # Last N messages in Redis (fast access)
-MAX_HISTORY_CONTEXT = 4    # Messages to include in LLM context
+MAX_SHORT_MEMORY = 5       
+MAX_HISTORY_CONTEXT = 4   
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 20
 TOP_K_RETRIEVAL = 4
@@ -53,13 +41,20 @@ Mongo_Url = os.getenv("MONGO_URL")
 EMBED_MODEL_PATH = os.getenv("EMBEDMODEL")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
+all_docs = []
+all_embeddings = []
+image_data_store = {}
+
+
+
+
 
 # =============================================================================
 # MONGODB & REDIS SETUP
 # =============================================================================
 def init_storage():
     """Initialize MongoDB and Redis connections."""
-    global mongo_client, db, collection, redis_client
+    global mongo_client, db, collection, redis_client , mongo_client
     
     try:
         from pymongo import MongoClient
@@ -176,40 +171,185 @@ def format_context_for_model(messages: list) -> str:
     
     return context_text + "\n"
 
+def fit_bmencoder(text):
+    from pinecone_text.sparse import BM25Encoder
+    sparser_encode = BM25Encoder().fit(text)
+    pc_retriver.sparse_encoder = sparser_encode
 # =============================================================================
 # TEXT PROCESSING FUNCTIONS
 # =============================================================================
-def extract_text_from_file(filename: str, data: bytes) -> str:
-    """Extract text from uploaded files (PDF or text-based files)."""
+def extract_and_store(filename: str, data):
+    """Extract text and images from uploaded files."""
+    from langchain_classic.text_splitter import RecursiveCharacterTextSplitter
+    from PIL import Image
+    import base64
+    import io
+    global new_namespace
+    import pymupdf
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
     if filename.lower().endswith(".pdf"):
-        from pypdf import PdfReader
+        pdf_bytes = data.file.read()
 
-        reader = PdfReader(io.BytesIO(data))
-        text = ""
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
 
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:  # avoid None
-                text += page_text + "\n"
+        for i, page in enumerate(doc):
+            text = page.get_text()
+            if text.strip():
+                temp_doc = Document(
+                    page_content=text,
+                    metadata={"page": i, "type": "text"}
+                )
+                text_chunks = splitter.split_documents([temp_doc])
 
-        return text
+                for chunk in text_chunks:
+                    embedding = clip_embedder.embed_query(chunk.page_content)
+                    all_embeddings.append(embedding)
+                    all_docs.append(chunk)
 
-    # handle ANY text-based file, not just .txt
+            for img_index, img in enumerate(page.get_images(full=True)):
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+
+                    pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+                    image_id = f"page_{i}_img_{img_index}"
+
+                    buffered = io.BytesIO()
+                    pil_image.save(buffered, format="PNG")
+                    img_base64 = base64.b64encode(buffered.getvalue()).decode()
+                    image_data_store[image_id] = img_base64
+
+                    embedding = clip_embedder.embed_image(pil_image)
+                    all_embeddings.append(embedding)
+
+                    image_doc = Document(
+                        page_content=f"[Image: {image_id}]",
+                        metadata={
+                            "page": i,
+                            "type": "image",
+                            "image_id": image_id
+                        }
+                    )
+                    all_docs.append(image_doc)
+
+                except Exception as e:
+                    print(f"Error processing image {img_index} on page {i}: {e}")
+
     elif filename.lower().endswith((".txt", ".md", ".csv", ".json", ".log", ".xml")):
-        return data.decode("utf-8")
+        return data.file.read().decode("utf-8")
 
     else:
         raise ValueError(f"Unsupported file type: {filename}")
+    
+    import numpy as np
+    embeddings_array = np.array(all_embeddings)
+    vectors = []
+    for i, (doc, emb) in enumerate(zip(all_docs, embeddings_array)):
+        vectors.append(
+            {
+                "id": f"doc-{i}",
+                "values": emb.tolist(),
+                "metadata": {
+                    "context": doc.page_content,
+                    **doc.metadata,
+                },
+            }
+        )
+    
+    name = os.path.splitext(filename)[0]
+    new_namespace = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+    
 
-def get_chunks_format_text(text):
+    pc_index.upsert(
+        vectors=vectors,
+        namespace=new_namespace)
+    return all_docs
+
+def create_multimodal_message(retrieved_docs):
+    content = []
+
+    # Add the query
+
+    # Separate text and image documents
+    text_docs = [doc for doc in retrieved_docs if doc.metadata.get("type") == "text"]
+    image_docs = [doc for doc in retrieved_docs if doc.metadata.get("type") == "image"]
+
+    # Add text context
+    if text_docs:
+        text_context = "\n\n".join(
+            [f"[Page content: {doc.page_content}" for doc in text_docs]
+        )
+        content.append({"type": "text", "text": f"Text excerpts:\n{text_context}\n"})
+
+    if image_docs is not None:
+        for doc in image_docs:
+            image_id = doc.metadata.get("image_id")
+            if image_id and image_id in image_data_store:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"\n[Image from page {doc.metadata['page']}]:\n",
+                    }
+                                )
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_data_store[image_id]}"
+                                    },
+                    }
+                                )
+
+    return content
+
+def content_to_documents(contents, base_metadata=None):
+    content = create_multimodal_message(contents)
+    docs = []
+    base_metadata = base_metadata or {}
+
+    for i, item in enumerate(content):
+        if item.get("type") == "text":
+            docs.append(
+                Document(
+                    page_content=item.get("text", ""),
+                    metadata={
+                        **base_metadata,
+                        "chunk_id": i,
+                        "type": "text",
+                    },
+                )
+            )
+
+    return docs
+
+def get_chunks_format_text(texts):
     """Split text into chunks. Handles both Document objects and plain text."""
     from langchain_classic.text_splitter import RecursiveCharacterTextSplitter
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP
     )
+    text = content_to_documents(texts)
+    if isinstance(text, list):
+        # List of Document objects
+        context = " ".join(doc.page_content for doc in text)
+    else:
+        # Plain text string
+        context = text
+    
+    return text_splitter.split_text(context)
 
+def get_format_text(text):
+    """Split text into chunks. Handles both Document objects and plain text."""
+    from langchain_classic.text_splitter import RecursiveCharacterTextSplitter
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP
+    )
     if isinstance(text, list):
         # List of Document objects
         context = " ".join(doc.page_content for doc in text)
@@ -262,53 +402,138 @@ async def async_model(question: str, session_id: str = "default") -> str:
 # =============================================================================
 # CUSTOM PINECONE RETRIEVER
 # =============================================================================
+from langchain_core.embeddings import Embeddings
+from PIL import Image
+class CLIPMultimodalEmbeddings(Embeddings):
+    """
+    Unified CLIP embeddings for text and images
+    (Pinecone-safe)
+    """
+
+    def __init__(self, model, processor):
+        self.model = model
+        self.processor = processor
+        self.model.eval()
+
+    def _normalize(self, x: np.ndarray) -> np.ndarray:
+        return x / np.linalg.norm(x)
+
+    def embed_query(self, text: str):
+        return self._embed_text(text)
+
+    def embed_documents(self, texts):
+        return [self._embed_text(t) for t in texts]
+
+    def embed_image(self, image):
+        return self._embed_image(image)
+
+    def _embed_text(self, text: str) -> list[float]:
+        inputs = self.processor(
+            text=text,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=77,
+        )
+
+        features = self.model.get_text_features(**inputs)
+
+        vec = features[0].detach().cpu().numpy()   # ✅ (512,)
+        vec = self._normalize(vec)
+
+        return vec.astype(float).tolist()
+
+    def _embed_image(self, image) -> list[float]:
+        if isinstance(image, str):
+            image = Image.open(image).convert("RGB")
+
+        inputs = self.processor(images=image, return_tensors="pt")
+
+        features = self.model.get_image_features(**inputs)
+
+        vec = features[0].detach().cpu().numpy()   # ✅ (512,)
+        vec = self._normalize(vec)
+
+        return vec.astype(float).tolist()
 
 from langchain_classic.retrievers import PineconeHybridSearchRetriever
 from langchain_core.documents import Document
-class CPineconeHybridRetriever(PineconeHybridSearchRetriever):
+class CustomPineconeHybridRetriever(PineconeHybridSearchRetriever):
+    def _normalize_text(self, text):
+        # LangChain Documents
+        if isinstance(text, list):
+            if hasattr(text[0], "page_content"):
+                return "\n".join(d.page_content for d in text)
+            return "\n".join(map(str, text))
+
+        # Single Document
+        if hasattr(text, "page_content"):
+            return text.page_content
+
+        # Already string
+        if isinstance(text, str):
+            return text
+
+        raise ValueError("Text must be str, Document, or list of Documents")
+
     def _get_relevant_documents(self, query, run_manager=None, **kwargs):
         if isinstance(query, dict):
-            # When coming from RunnableParallel, query contains the full context
-            actual_query = query.get("question", str(query))
-        else:
-            actual_query = str(query)
-        
-        print(f"🔍 Query type: {type(query)}, Extracted: {actual_query[:100]}")
+            text = query.get("text")
+            image = query.get("image")
 
-        dense_vec = self.embeddings.embed_query(actual_query)
-        
+            if image is not None and text is not None:
 
-        # 🔥 FIX: If sparse vector is empty, remove it
-        try:
-            sparse_vec = self.sparse_encoder.encode_queries(actual_query)
-            
-            # FIX 2: Handle empty sparse vectors properly
-            if sparse_vec and len(sparse_vec.get("indices", [])) == 0:
-                print("⚠️ Empty sparse vector, using dense only")
-                sparse_vec = None
-        except Exception as e:
-            print(f"⚠️ Sparse encoding failed: {e}, falling back to dense only")
+                text = self._normalize_text(text)
+                image_vec = np.array(self.embeddings.embed_image(image))
+                text_vec = np.array(self.embeddings.embed_query(text))
+
+                # 🔥 Weighted merge (simple + effective)
+                dense_vec = 0.6 * image_vec + 0.4 * text_vec
+
+                sparse_vec = self.sparse_encoder.encode_queries(text)
+
+        elif isinstance(query, Image.Image):
+            dense_vec = self.embeddings.embed_image(query)
             sparse_vec = None
 
+        elif isinstance(query, str):
+            dense_vec = self.embeddings.embed_query(query)
+            sparse_vec = self.sparse_encoder.encode_queries(query)
+
+        else:
+            raise ValueError("Unsupported query type")
+
+        if dense_vec is not None:
+            dense_vec = dense_vec
+
+        if len(sparse_vec["indices"]) == 0:
+            sparse_vec = None
 
         result = self.index.query(
             vector=dense_vec,
             sparse_vector=sparse_vec,
             top_k=self.top_k,
             include_metadata=True,
-            namespace= new_namespace or "jack-story",)
+            namespace=new_namespace,
+        )
 
-        docs = []
-        for m in result.matches:
-            docs.append(Document(page_content=m.metadata.get("context",""),metadata={"score":m.score}))
-        return docs
-
+        return [
+            Document(
+                page_content=m.metadata.get("context", ""),
+                metadata={
+                    "score": m.score,
+                    "type": m.metadata.get("modality", "text"),
+                    "source": m.metadata.get("source"),
+                    "page": m.metadata.get("page"),
+                },
+            )
+            for m in result.matches
+        ]
 def extract_question(input_dict):
     """Extract just the question from the input"""
     if isinstance(input_dict, dict):
       return input_dict.get("question", str(input_dict))
     return str(input_dict)
-
 
 # =============================================================================
 # LIFESPAN - STARTUP
@@ -316,7 +541,7 @@ def extract_question(input_dict):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all resources on startup."""
-    global llm, chat_llm, embed_llm, pc_retriver, pc_index, final_chain, sparser_encode, startup_time , parellal_runnable
+    global llm, clip_model,clip_processor, pc_retriver, pc_index, final_chain, sparser_encode, startup_time , parellal_runnable , clip_embedder
     
     start = time.time()
     print("\n" + "="*70)
@@ -327,13 +552,6 @@ async def lifespan(app: FastAPI):
     print("\n⏱️ Initializing storage...")
     init_storage()
     
-    # Initialize text splitter
-    # from langchain_classic.text_splitter import RecursiveCharacterTextSplitter
-    # text_splitter = RecursiveCharacterTextSplitter(
-    #     chunk_size=CHUNK_SIZE,
-    #     chunk_overlap=CHUNK_OVERLAP
-    # )
-    
     # Load data
     print("\n⏱️ Loading data...")
     from pinecone_text.sparse import BM25Encoder
@@ -342,14 +560,12 @@ async def lifespan(app: FastAPI):
     step_start = time.time()
     text_loader = TextLoader("texts.text")
     text_loaded = text_loader.load()
-    chunks = get_chunks_format_text(text_loaded)
+    chunks = get_format_text(text_loaded)
     print(f"✅ Loaded {len(chunks)} chunks in {time.time() - step_start:.2f}s")
     
     # Fit BM25 encoder
     print("⏱️ Fitting BM25 encoder...")
-    step_start = time.time()
     sparser_encode = BM25Encoder().fit(chunks)
-    print(f"✅ BM25 fitted in {time.time() - step_start:.2f}s")
     
     # Import libraries
     print("\n⏱️ Importing libraries...")
@@ -358,40 +574,28 @@ async def lifespan(app: FastAPI):
     from langchain_core.runnables import RunnableParallel, RunnableLambda, RunnablePassthrough
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
-    from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace, HuggingFaceEndpointEmbeddings
-    from transformers import AutoTokenizer , AutoModelForCausalLM
-    from sentence_transformers import SentenceTransformer
+    # from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace, HuggingFaceEndpointEmbeddings
+    # from transformers import AutoTokenizer , AutoModelForCausalLM
+    # from sentence_transformers import SentenceTransformer
     print(f"✅ Libraries imported in {time.time() - step_start:.2f}s")
     
     # Setup HuggingFace
     print("\n⏱️ loading models ...")
     step_start = time.time()
     
-    from langchain.embeddings.base import Embeddings
-    from transformers import pipeline
-    from langchain_huggingface import HuggingFacePipeline
-    class SentenceTransformerEmbeddings(Embeddings):
-        def __init__(self, model):
-            self.model = model
+    # from langchain.embeddings.base import Embeddings
+    # from transformers import pipeline
+    from transformers import CLIPModel , CLIPProcessor
 
-        def embed_documents(self, texts):
-            return self.model.encode(
-                texts,
-                convert_to_numpy=True,
-                normalize_embeddings=True
-                ).tolist()
 
-        def embed_query(self, text):
-            return self.model.encode(
-                [text],
-                convert_to_numpy=True,
-                normalize_embeddings=True
-                )[0].tolist()
+    clip_model = CLIPModel.from_pretrained(EMBED_MODEL_PATH)
+    clip_processor = CLIPProcessor.from_pretrained(EMBED_MODEL_PATH)
+    clip_embedder = CLIPMultimodalEmbeddings(
+    model=clip_model,
+    processor=clip_processor,)
 
-    
-    embed_llm = SentenceTransformer(EMBED_MODEL_PATH)
-    print(embed_llm.get_sentence_embedding_dimension() > 0)
-    embedder = SentenceTransformerEmbeddings(model=embed_llm)
+    # print(embed_llm.get_sentence_embedding_dimension() > 0)
+    # embedder = SentenceTransformerEmbeddings(model=embed_llm)
     print("✅ embedding model loaded")
 
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash",google_api_key=GOOGLE_API_KEY)
@@ -402,10 +606,10 @@ async def lifespan(app: FastAPI):
     step_start = time.time()
     
     pinecone_storage = Pinecone(api_key=PINECONE_KEY)
-    pc_index = pinecone_storage.Index("rag-endtoend")
+    pc_index = pinecone_storage.Index("rag-img-text-db")
     
-    pc_retriver = CPineconeHybridRetriever(
-        embeddings=embedder,
+    pc_retriver = CustomPineconeHybridRetriever(
+        embeddings=clip_embedder,
         index=pc_index,
         top_k=TOP_K_RETRIEVAL,
         sparse_encoder=sparser_encode
@@ -450,240 +654,13 @@ async def lifespan(app: FastAPI):
     
     print(f"✅ RAG chain ready in {time.time() - step_start:.2f}s")
     
-    startup_time = time.time() - start
+    
+    app.state.startup_time = time.time() - start
     print("\n" + "="*70)
-    print(f"✅ APPLICATION READY! Startup: {startup_time:.2f}s")
+    print(f"✅ APPLICATION READY! Startup: {app.state.startup_time:.2f}s")
     print("="*70 + "\n")
     
     yield
     
     # Cleanup
     print("\n🛑 Shutting down...")
-    # query_cache.clear()
-    # if mongo_client:
-    #     mongo_client.close()
-    # if redis_client:
-    #     redis_client.close()
-
-# =============================================================================
-# FASTAPI APPLICATION
-# =============================================================================
-app = FastAPI(
-    title="RAG Chatbot with Memory",
-    description="RAG chatbot with MongoDB + Redis conversation memory",
-    version="2.0",
-    lifespan=lifespan
-)
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
-
-# =============================================================================
-# MAIN ROUTES
-# =============================================================================
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    session_id = "default"
-
-    # Load history (from Redis + MongoDB)
-    raw_history = get_conversation_context(session_id, include_mongo=True)
-
-    # Convert to frontend-friendly format
-    chat_history = []
-    for msg in raw_history:
-        chat_history.append({
-            "type": "user" if msg["role"] == "user" else "assistant",
-            "content": msg["content"]
-        })
-
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "chat_history": chat_history,
-            "latency": None,
-            "startup_time": f"{startup_time:.2f}s"
-        }
-    )
-
-@app.post("/chat")
-async def chat(request: Request):
-    """Handle chat with MongoDB + Redis storage."""
-    try:
-        data = await request.json()
-        question = data.get("question", "").strip()
-        session_id = data.get("session_id", "default")
-        
-        if not question:
-            return JSONResponse(
-                {"error": "Please enter a question"},
-                status_code=400
-            )
-        
-        request_start = time.time()
-        
-        # Generate response with conversation context
-        answer = await async_model(question, session_id)
-        
-        # Convert to HTML
-        answer_html = markdown.markdown(
-            answer,
-            extensions=[TableExtension(), FencedCodeExtension()]
-        )
-        
-        # Calculate latency
-        latency_ms = int((time.time() - request_start) * 1000)
-        
-        # Save to storage
-        save_message_redis(session_id, "user", question)
-        save_message_redis(session_id, "bot", answer)
-        save_message_mongo(session_id, "user", question)
-        save_message_mongo(session_id, "bot", answer_html)
-        
-        return JSONResponse({
-            "answer": answer,
-            "answer_html": answer_html,
-            "latency": latency_ms,
-            "session_id": session_id
-        })
-        
-    except Exception as e:
-        print("❌ /chat error:")
-        traceback.print_exc()
-        return JSONResponse(
-            {"error": f"An error occurred: {str(e)}"},
-            status_code=500
-        )
-
-# =============================================================================
-# FILE UPLOAD
-# =============================================================================
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-    """Upload and process documents."""
-    global sparser_encode , new_namespace
-    
-    try:
-        if not (file.filename.endswith('.pdf') or file.filename.endswith('.text')):
-            return JSONResponse(
-                {"error": "Only PDF and TXT files are supported"},
-                status_code=400
-            )
-        
-        print(f"\n📄 Processing: {file.filename}")
-        start = time.time()
-        
-        # Extract text
-        contents = await file.read()
-        text = extract_text_from_file(file.filename, contents)
-        print(f"✅ Extracted {len(text)} characters")
-        
-        # Chunk text
-        chunks = get_chunks_format_text(text)
-        print(f"✅ Created {len(chunks)} chunks")
-        
-        name = os.path.splitext(file.filename)[0]
-        new_namespace = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-        pc_retriver.add_texts(
-               texts=chunks,
-               namespace=new_namespace)
-
-        # Re-fit BM25 with new chunks
-        from pinecone_text.sparse import BM25Encoder
-        all_chunks = chunks 
-        sparser_encode = BM25Encoder().fit(all_chunks)
-        pc_retriver.sparse_encoder = sparser_encode
-        print(f"✅ BM25 encoder updated")
-        
-        elapsed = time.time() - start
-        
-        return JSONResponse({
-            "status": "success",
-            "filename": file.filename,
-            "chunks": len(chunks),
-            "processing_time": f"{elapsed:.2f}s"
-        })
-        
-    except Exception as e:
-        print(f"❌ Upload error: {e}")
-        traceback.print_exc()
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-# =============================================================================
-# CONVERSATION HISTORY ENDPOINTS
-# =============================================================================
-@app.get("/history/{session_id}")
-async def get_history(session_id: str, limit: int = 50):
-    """Get conversation history for a session."""
-    try:
-        history = get_conversation_context(session_id, include_mongo=True, mongo_limit=limit)
-        return JSONResponse({
-            "session_id": session_id,
-            "messages": history,
-            "count": len(history)
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-@app.delete("/history/{session_id}")
-async def clear_session_history(session_id: str):
-    """Clear history for a specific session."""
-    try:
-        # Clear Redis
-        if redis_client:
-            redis_client.delete(f"chat:{session_id}")
-        
-        # Clear MongoDB
-        if collection:
-            result = collection.delete_many({"session_id": session_id})
-            deleted = result.deleted_count
-        else:
-            deleted = 0
-        
-        return JSONResponse({
-            "message": f"Cleared history for session {session_id}",
-            "deleted_messages": deleted
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-# =============================================================================
-# UTILITY ENDPOINTS
-# =============================================================================
-@app.get("/health")
-async def health():
-    """Health check."""
-    return {
-        "status": "healthy",
-        "startup_time": f"{startup_time:.2f}s",
-        "mongodb": collection is not None,
-        "redis": redis_client is not None,
-        "query_cache_size": len(query_cache)
-    }
-
-@app.get("/stats")
-async def stats():
-    """Get statistics."""
-    mongo_count = 0
-    if collection:
-        try:
-            mongo_count = collection.count_documents({})
-        except:
-            pass
-    
-    return {
-        "startup_time": f"{startup_time:.2f}s",
-        "mongodb_messages": mongo_count,
-        "redis_connected": redis_client is not None,
-        "query_cache": {
-            "size": len(query_cache),
-            "cached_queries": list(query_cache.keys())[:5]
-        }
-    }
-
-@app.post("/clear-cache")
-async def clear_cache():
-    """Clear query cache."""
-    query_cache.clear()
-    return {"message": "Cache cleared"}
-    
