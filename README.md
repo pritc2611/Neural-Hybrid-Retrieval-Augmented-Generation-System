@@ -77,6 +77,40 @@ Final Answer
 7. Final answer is generated
 
 ---
+🛠️ How to Run Locally
+---
+
+---
+Requirements
+- Python 3.10+
+- Pinecone account
+- GPU recommended
+  
+---
+Installation
+
+git clone <repo-url>
+cd multimodal-rag
+pip install -r requirements.txt
+
+---
+Environment Variables
+
+Create a `.env` file:
+
+```
+PINECONE_API_KEY=your_key
+PINECONE_INDEX_NAME=your index name
+```
+
+---
+Run Server
+
+```
+uvicorn api.main:app --reload
+```
+
+---
 📈 Future Improvements
 ---
 
@@ -84,3 +118,4 @@ Final Answer
 - Better reranking
 - Query rewriting
 - Feedback learning loop
+  
