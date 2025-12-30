@@ -91,8 +91,8 @@ Requirements
 Installation
 
 ```
-git clone https://github.com/pritc2611/RAG-app.git
-cd multimodal-rag
+git clone https://github.com/pritc2611/Multi-Modal-RAG.git
+cd multi-modal-rag
 pip install -r requirements.txt
 ```
 
