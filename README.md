@@ -48,6 +48,7 @@ This approach is known as Retrieval-Augmented Generation (RAG).
 🏗️ System Architecture
 ---
 
+```
 User
  ↓
 Upload PDF
@@ -63,7 +64,7 @@ Retriever
 LLM
  ↓
 Final Answer
-
+```
 ---
 🔄 Retrieval Logic
 ---
