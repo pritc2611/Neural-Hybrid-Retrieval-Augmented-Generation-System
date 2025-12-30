@@ -89,9 +89,11 @@ Requirements
 ---
 Installation
 
-git clone <repo-url>
+```
+git clone https://github.com/pritc2611/RAG-app.git
 cd multimodal-rag
 pip install -r requirements.txt
+```
 
 ---
 Environment Variables
