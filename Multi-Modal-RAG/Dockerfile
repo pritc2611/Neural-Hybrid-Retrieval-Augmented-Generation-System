@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requir.txt .
 
 RUN pip install --upgrade pip \
-    && pip install -r requir.txt
+    && pip install -r requirements.txt
 
 # 🔹 Copy app last
 COPY . .
