@@ -130,10 +130,12 @@ def get_short_memory(session_id: str) -> list:
 
 def get_conversation_context(session_id: str, include_mongo: bool = False, mongo_limit: int = 50) -> list:
     """
-    Fetch conversation context for a session.
-    Returns: list of dicts [{"role": "user"/"bot", "content": "..."}]
+    fetching conversation context for a session.
+    this will returns: list of dicts [{"role": "user"/"bot", "content": "..."}]
     """
     # Get recent messages from Redis
+    print("getting privious converstion. . . ")
+    start_time = time.time()
     context = get_short_memory(session_id)
     
     if include_mongo and collection is not None:
@@ -156,6 +158,7 @@ def get_conversation_context(session_id: str, include_mongo: bool = False, mongo
             print(f"⚠️ MongoDB read failed: {e}")
     
     # Return only last MAX_HISTORY_CONTEXT messages for LLM
+    print(f"returning converstion in {start_time - time.time()}")
     return context[-MAX_HISTORY_CONTEXT:]
 
 def format_context_for_model(messages: list) -> str:
@@ -175,9 +178,11 @@ def fit_bmencoder(text):
     from pinecone_text.sparse import BM25Encoder
     sparser_encode = BM25Encoder().fit(text)
     pc_retriver.sparse_encoder = sparser_encode
+
 # =============================================================================
 # TEXT PROCESSING FUNCTIONS
 # =============================================================================
+
 def extract_and_store(filename: str, data):
     """Extract text and images from uploaded files."""
     from langchain_classic.text_splitter import RecursiveCharacterTextSplitter
@@ -188,6 +193,9 @@ def extract_and_store(filename: str, data):
     import pymupdf
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    print("extracting and storing from Docs. . .")
+    start_time = time.time()
+
 
     if filename.lower().endswith(".pdf"):
         pdf_bytes = data.file.read()
@@ -267,6 +275,7 @@ def extract_and_store(filename: str, data):
     pc_index.upsert(
         vectors=vectors,
         namespace=new_namespace)
+    print(f"stored Docs in about {start_time - time.time()}")
     return all_docs
 
 def create_multimodal_message(retrieved_docs):
@@ -275,6 +284,8 @@ def create_multimodal_message(retrieved_docs):
     # Add the query
 
     # Separate text and image documents
+    start = time.time()
+    print("creating multimodal input message")
     text_docs = [doc for doc in retrieved_docs if doc.metadata.get("type") == "text"]
     image_docs = [doc for doc in retrieved_docs if doc.metadata.get("type") == "image"]
 
@@ -303,13 +314,14 @@ def create_multimodal_message(retrieved_docs):
                                     },
                     }
                                 )
-
+    print(f"returning message in {start - time.time()}")
     return content
 
 def content_to_documents(contents, base_metadata=None):
     content = create_multimodal_message(contents)
     docs = []
     base_metadata = base_metadata or {}
+
 
     for i, item in enumerate(content):
         if item.get("type") == "text":
@@ -333,6 +345,7 @@ def get_chunks_format_text(texts):
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP
     )
+    start = time.time()
     text = content_to_documents(texts)
     if isinstance(text, list):
         # List of Document objects
@@ -341,6 +354,7 @@ def get_chunks_format_text(texts):
         # Plain text string
         context = text
     
+    print(f"returned formated chunks in about {start - time.time()}")    
     return text_splitter.split_text(context)
 
 def get_format_text(text):
@@ -364,7 +378,8 @@ def get_format_text(text):
 # =============================================================================
 async def async_model(question: str, session_id: str = "default") -> str:
     print(f"🔍 Processing: {question[:50]}...")
-
+    
+    
     conversation_history = get_conversation_context(session_id, include_mongo=True)
     context_text = format_context_for_model(conversation_history)
 
@@ -406,8 +421,7 @@ from langchain_core.embeddings import Embeddings
 from PIL import Image
 class CLIPMultimodalEmbeddings(Embeddings):
     """
-    Unified CLIP embeddings for text and images
-    (Pinecone-safe)
+    CLIP embeddings model for text and images
     """
 
     def __init__(self, model, processor):
@@ -487,7 +501,6 @@ class CustomPineconeHybridRetriever(PineconeHybridSearchRetriever):
                 image_vec = np.array(self.embeddings.embed_image(image))
                 text_vec = np.array(self.embeddings.embed_query(text))
 
-                # 🔥 Weighted merge (simple + effective)
                 dense_vec = 0.6 * image_vec + 0.4 * text_vec
 
                 sparse_vec = self.sparse_encoder.encode_queries(text)
@@ -596,10 +609,8 @@ async def lifespan(app: FastAPI):
 
     # print(embed_llm.get_sentence_embedding_dimension() > 0)
     # embedder = SentenceTransformerEmbeddings(model=embed_llm)
-    print("✅ embedding model loaded")
 
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash",google_api_key=GOOGLE_API_KEY)
-    print("✅ text model loaded")
     print(f"✅ text model ready in {time.time() - step_start:.2f}s")
 
     print("\n⏱️ Setting up Pinecone...")
