@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Assistant - AI-Powered Chat</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+
+<div class="app-container">
+    <!-- Modern Sidebar -->
+    <aside class="sidebar" id="sidebar">
+        <!-- Sidebar Header -->
+        <div class="sidebar-header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                        <rect width="32" height="32" rx="8" fill="url(#gradient)"/>
+                        <path d="M16 8L21 13L16 18L11 13L16 8Z" fill="white" opacity="0.9"/>
+                        <path d="M16 14L21 19L16 24L11 19L16 14Z" fill="white" opacity="0.6"/>
+                        <defs>
+                            <linearGradient id="gradient" x1="0" y1="0" x2="32" y2="32">
+                                <stop offset="0%" stop-color="#667eea"/>
+                                <stop offset="100%" stop-color="#764ba2"/>
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <h1>RAG Assistant</h1>
+                    <span class="logo-subtitle">AI-Powered Knowledge</span>
+                </div>
+            </div>
+            
+            <button class="icon-btn theme-toggle" id="theme-toggle" title="Toggle theme">
+                <svg class="theme-icon sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <circle cx="12" cy="12" r="5"/>
+                    <line x1="12" y1="1" x2="12" y2="3"/>
+                    <line x1="12" y1="21" x2="12" y2="23"/>
+                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+                    <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                    <line x1="1" y1="12" x2="3" y2="12"/>
+                    <line x1="21" y1="12" x2="23" y2="12"/>
+                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+                    <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                </svg>
+                <svg class="theme-icon moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                </svg>
+            </button>
+        </div>
+
+        <!-- New Chat Button -->
+        <button class="new-chat-btn" id="new-chat-btn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"/>
+                <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            <span>New Chat</span>
+        </button>
+
+    
+        <!-- Stats Panel -->
+        <div class="stats-card">
+            <div class="stats-header">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                </svg>
+                <span>Performance</span>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <span class="stat-value">{{ chat_history|length }}</span>
+                    <span class="stat-label">Messages</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-value">{{ startup_time if startup_time else 'N/A' }}</span>
+                    <span class="stat-label">Startup</span>
+                </div>
+                {% if latency %}
+                <div class="stat-item">
+                    <span class="stat-value">{{ latency }}</span>
+                    <span class="stat-label">Response</span>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Recent Chats -->
+        <div class="sidebar-section">
+            <div class="section-header">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                </svg>
+                <span>Recent</span>
+            </div>
+            <div class="chat-history" id="chat-history-list">
+                {% set user_messages = chat_history | selectattr("type", "equalto", "user") | list %}
+                {% for message in user_messages[-5:] %}
+                <div class="history-item">
+                    <div class="history-content">
+                        <p>{{ message.content[:40] }}{% if message.content|length > 40 %}...{% endif %}</p>
+                    </div>
+                </div>
+                {% endfor %}
+                {% if not user_messages %}
+                <div class="empty-state">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M12 6v6l4 2"/>
+                    </svg>
+                    <p>No chats yet</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Sidebar Footer -->
+        <div class="sidebar-footer">
+            <button class="footer-btn" id="clear-history-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="3 6 5 6 21 6"/>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                </svg>
+                Clear History
+            </button>
+            <button class="footer-btn" id="settings-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M12 1v6m0 6v6M5.6 5.6l4.2 4.2m4.2 4.2l4.2 4.2M1 12h6m6 0h6M5.6 18.4l4.2-4.2m4.2-4.2l4.2-4.2"/>
+                </svg>
+                Settings
+            </button>
+        </div>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <main class="main-content">
+        <!-- Top Navigation -->
+        <nav class="top-nav">
+            <button class="icon-btn sidebar-toggle" id="sidebar-toggle">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="12" x2="21" y2="12"/>
+                    <line x1="3" y1="6" x2="21" y2="6"/>
+                    <line x1="3" y1="18" x2="21" y2="18"/>
+                </svg>
+            </button>
+
+            <div class="nav-title">
+                <h2>Chat</h2>
+                <span class="status-indicator">
+                    <span class="status-dot"></span>
+                    Online
+                </span>
+            </div>
+
+            <div class="nav-actions">
+                <button class="icon-btn" id="export-btn" title="Export chat">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="7 10 12 15 17 10"/>
+                        <line x1="12" y1="15" x2="12" y2="3"/>
+                    </svg>
+                </button>
+            </div>
+        </nav>
+
+        <!-- Chat Window -->
+        <div class="chat-window" id="chat-window">
+            {% if not chat_history %}
+            <!-- Welcome Screen -->
+            <div class="welcome-screen">
+                <div class="welcome-content">
+                    <div class="welcome-animation">
+                        <div class="gradient-orb"></div>
+                        <div class="welcome-icon">
+                            <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+                                <rect width="64" height="64" rx="16" fill="url(#welcome-gradient)"/>
+                                <path d="M32 16L42 26L32 36L22 26L32 16Z" fill="white" opacity="0.9"/>
+                                <path d="M32 28L42 38L32 48L22 38L32 28Z" fill="white" opacity="0.6"/>
+                                <defs>
+                                    <linearGradient id="welcome-gradient" x1="0" y1="0" x2="64" y2="64">
+                                        <stop offset="0%" stop-color="#667eea"/>
+                                        <stop offset="100%" stop-color="#764ba2"/>
+                                    </linearGradient>
+                                </defs>
+                            </svg>
+                        </div>
+                    </div>
+                    
+                    <h2>Welcome to RAG Assistant</h2>
+                    <p>Upload documents and ask any questions. Get accurate, context-aware answers powered by AI.</p>
+                    
+                    <div class="welcome-suggestions">
+                        <div class="suggestion-card" data-question="Summarize this document for me">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                <polyline points="14 2 14 8 20 8"/>
+                                <line x1="16" y1="13" x2="8" y2="13"/>
+                                <line x1="16" y1="17" x2="8" y2="17"/>
+                                <polyline points="10 9 9 9 8 9"/>
+                            </svg>
+                            <div class="suggestion-text">
+                                <strong>Summarize</strong>
+                                <span>Get a quick overview</span>
+                            </div>
+                        </div>
+                        
+                        <div class="suggestion-card" data-question="What are the key findings?">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"/>
+                                <path d="m21 21-4.35-4.35"/>
+                            </svg>
+                            <div class="suggestion-text">
+                                <strong>Analyze</strong>
+                                <span>Find key insights</span>
+                            </div>
+                        </div>
+                        
+                        <div class="suggestion-card" data-question="Explain this in detail">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"/>
+                                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+                                <line x1="12" y1="17" x2="12.01" y2="17"/>
+                            </svg>
+                            <div class="suggestion-text">
+                                <strong>Explain</strong>
+                                <span>Deep dive into topics</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Chat Messages -->
+            <div class="messages-container">
+                {% for message in chat_history %}
+                    {% if message.type == "user" %}
+                    <div class="message-group user-message">
+                        <div class="message-bubble">
+                            <div class="message-text">{{ message.content }}</div>
+                        </div>
+                        <div class="message-avatar">
+                            <div class="avatar user-avatar">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                                    <circle cx="12" cy="7" r="4"/>
+                                </svg>
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="message-group assistant-message">
+                        <div class="message-avatar">
+                            <div class="avatar assistant-avatar">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                                    <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                                </svg>
+                            </div>
+                        </div>
+                        <div class="message-bubble">
+                            <div class="message-text markdown-content">{{ message.content | safe }}</div>
+                            <div class="message-actions">
+                                <button class="action-btn copy-btn" title="Copy">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                                    </svg>
+                                </button>
+                                <button class="action-btn like-btn" title="Good">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/>
+                                    </svg>
+                                </button>
+                                <button class="action-btn dislike-btn" title="Bad">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+
+            <!-- Typing Indicator -->
+            <div class="message-group assistant-message typing-indicator" id="typing-indicator" style="display:none;">
+                <div class="message-avatar">
+                    <div class="avatar assistant-avatar">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                        </svg>
+                    </div>
+                </div>
+                <div class="message-bubble typing-bubble">
+                    <div class="typing-dots">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="input-area">
+            <form id="chat-form" class="input-wrapper">
+                <input type="file" id="fileInput" style="display:none;" accept=".pdf,.txt,.md">
+                
+                <button type="button" class="icon-btn attach-btn" id="attachBtn" title="Upload document">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+                    </svg>
+                </button>
+
+                <textarea 
+                    id="question" 
+                    name="question"
+                    placeholder="Ask me anything..."
+                    rows="1"
+                    autocomplete="off"
+                    required
+                ></textarea>
+
+                <button type="submit" class="send-btn" id="send-btn">
+                    <svg class="send-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="22" y1="2" x2="11" y2="13"/>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                    </svg>
+                </button>
+            </form>
+            
+            <div class="input-footer">
+                <span class="char-counter" id="char-count">0 / 500</span>
+                <span class="keyboard-hint">
+                    <kbd>Enter</kbd> to send • <kbd>Shift + Enter</kbd> for new line
+                </span>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- Toast Notification -->
+<div class="toast" id="toast"></div>
+
+<!-- Scripts -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="/static/script.js"></script>
+
+</body>
+</html>

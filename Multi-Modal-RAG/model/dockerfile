@@ -1,0 +1,41 @@
+FROM python:3.10-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# Build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libjpeg-dev \
+    zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first (cache-friendly)
+COPY require.txt .
+
+# Install Python deps
+RUN pip install --prefix=/dependencies -r require.txt
+
+
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Copy installed Python packages
+COPY --from=builder /dependencies /usr/local
+
+ENV PATH=/usr/local/bin:$PATH
+
+# Copy app code
+COPY ./clip_model .
+COPY modelapi.py .
+COPY .env .
+
+
+EXPOSE 8000
+
+CMD ["uvicorn", "modelapi:app", "--host", "0.0.0.0", "--port", "8000"]
