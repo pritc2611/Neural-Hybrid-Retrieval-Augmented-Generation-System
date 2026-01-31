@@ -3,7 +3,7 @@ name: Rag Pipeline
 on:
   push:
     branches:
-      - main
+      - master
 
 jobs:
   build-test-deploy:
