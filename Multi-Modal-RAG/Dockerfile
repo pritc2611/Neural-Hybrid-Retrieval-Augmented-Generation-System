@@ -32,9 +32,12 @@ COPY --from=builder /dependencies /usr/local
 ENV PATH=/usr/local/bin:$PATH
 
 # 🔹 Copy app last
-COPY . .
-
+COPY  static/  .
+COPY templates .
+COPY utility .
+COPY app.py .
+ COPY .env .
 
 EXPOSE 7000
 
-CMD ["uvicorn", "rag_app:app", "--host", "0.0.0.0", "--port", "7000"]
+CMD ["uvicorn", "app.app:app", "--host", "0.0.0.0", "--port", "7000"]

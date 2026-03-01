@@ -2,18 +2,23 @@ version: "3.9"
 
 services:
   embedding:
-    image: embeder_service:latest
+    build:
+      context: embed_service_model/dockerfile
+      dockerfile: Dockerfile
     container_name: embedding_service
     ports:
-      - "8000:8000"   # optional, only if you want to access from host
+      - "8000:8000"   
     networks:
       - rag-network
 
   ragapp:
+    build:
+      context: .
+      dockerfile: dockerfile
     image: rag_service:latest
     container_name: rag_app
     ports:
-      - "7000:7000"   # optional, for accessing RAG app from host
+      - "7000:7000"   
     networks:
       - rag-network
     depends_on:

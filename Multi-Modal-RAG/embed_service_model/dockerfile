@@ -15,10 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first (cache-friendly)
-COPY require.txt .
+COPY requirments.txt .
 
 # Install Python deps
-RUN pip install --prefix=/dependencies -r require.txt
+RUN pip install --prefix=/dependencies -r requirments.txt
 
 
 FROM python:3.10-slim
@@ -31,11 +31,10 @@ COPY --from=builder /dependencies /usr/local
 ENV PATH=/usr/local/bin:$PATH
 
 # Copy app code
-COPY ./clip_model .
-COPY modelapi.py .
+COPY embed_service.py .
 COPY .env .
 
 
 EXPOSE 8000
 
-CMD ["uvicorn", "modelapi:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "embed_service:app", "--host", "0.0.0.0", "--port", "8000"]

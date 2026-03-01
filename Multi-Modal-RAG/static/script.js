@@ -1,558 +1,780 @@
-// ============================================================================
-// MODERN RAG ASSISTANT - INTERACTIVE SCRIPT
-// ============================================================================
+/* ═══════════════════════════════════════════════════════════════════════════
+   NeuralRAG — Frontend Controller  (fully audited & fixed)
+   All HTML IDs wired, stopTypingCycle defined, latency/chunks/status live.
+═══════════════════════════════════════════════════════════════════════════ */
 
-// --- GLOBAL STATE ---
-const state = {
-    isTyping: false,
-    currentTheme: localStorage.getItem('theme') || 'light',
-    messageCount: 0
+const MAX_CHARS = 2000;
+const SESSION_ID = `session-${Date.now()}`;
+
+// ── State ─────────────────────────────────────────────────────────────────
+let pendingFiles  = [];
+let attachedImage = null;
+let isGenerating  = false;
+let currentMode   = "hybrid";
+
+// ── DOM refs ──────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+// Core
+const sidebar        = $("sidebar");
+const chatScroll     = $("chat-scroll");
+const messages       = $("messages");
+const question       = $("question");
+const sendBtn        = $("send-btn");
+const typingEl       = $("typing");
+const typingStatus   = $("typing-status");   // FIX: was never grabbed
+const charCount      = $("char-count");
+const toast          = $("toast");
+
+// Upload
+const dropZone       = $("drop-zone");
+const fileInput      = $("fileInput");
+const browseLink     = $("browse-link");
+const fileQueue      = $("file-queue");
+const queueList      = $("queue-list");
+const uploadBtn      = $("upload-btn");
+const uploadBtnLabel = $("upload-btn-label"); // FIX: was never grabbed
+const cancelQueueBtn = $("cancel-queue-btn"); // FIX: was never grabbed
+const uploadProgress = $("upload-progress");
+const progressFill   = $("progress-fill");
+const progressLabel  = $("progress-label");
+const progressPct    = $("progress-pct");     // FIX: was never grabbed
+const perFileStatus  = $("per-file-status");  // FIX: was never grabbed
+
+// Image
+const imageInput   = $("imageInput");
+const attachImgBtn = $("attach-img-btn");
+const imgStrip     = $("img-preview-strip");
+const imgThumb     = $("img-thumb");
+const removeImgBtn = $("remove-img-btn");
+const inputWrapper = $("input-wrapper");      // FIX: was never grabbed
+
+// Namespace
+const nsBadge    = $("ns-badge");             // FIX: was never grabbed
+const nsLabel    = $("ns-label");
+const nsDropdown = $("ns-dropdown");          // FIX: was never grabbed
+const nsDropList = $("ns-dropdown-list");     // FIX: was never grabbed
+const nsRefresh  = $("ns-refresh-btn");       // FIX: was never grabbed
+
+// Status/perf chips
+const statusDot    = $("status-dot");         // FIX: was never grabbed
+const statusText   = $("status-text");        // FIX: was never grabbed
+const statLatency  = $("stat-latency");       // FIX: was never grabbed
+const latencyChip  = $("latency-chip");       // FIX: was never grabbed
+const statChunks   = $("stat-chunks");        // FIX: was never grabbed
+const chunksChip   = $("chunks-chip");        // FIX: was never grabbed
+const perfBadge    = $("perf-badge");         // FIX: was never grabbed
+const perfText     = $("perf-text");          // FIX: was never grabbed
+
+// Retriever label
+const retrieverLabel = $("retriever-label");  // FIX: was never grabbed
+const modeDesc       = $("mode-desc");        // FIX: was never grabbed
+
+// History
+const historyList = $("history-list");        // FIX: was never grabbed
+
+// ══════════════════════════════ UTILITIES ════════════════════════════════
+
+function showToast(msg, type = "info", duration = 3200) {
+    toast.textContent = msg;
+    toast.className = `toast show ${type}`;
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => { toast.className = "toast"; }, duration);
+}
+
+function scrollBottom(smooth = true) {
+    chatScroll.scrollTo({ top: chatScroll.scrollHeight, behavior: smooth ? "smooth" : "instant" });
+}
+
+function autoResize(el) {
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+}
+
+function fileIcon(filename) {
+    const ext = filename.split(".").pop().toLowerCase();
+    if (ext === "pdf") return "📄";
+    if (ext === "md")  return "📝";
+    return "📃";
+}
+
+function formatBytes(n) {
+    if (n < 1024)    return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+}
+
+// ── Status helpers ─────────────────────────────────────────────────────────
+function setStatusBusy(busy) {
+    if (statusDot)  statusDot.className  = "status-dot-live" + (busy ? " busy" : "");
+    if (statusText) statusText.textContent = busy ? "Processing…" : "Hybrid RAG Active";
+}
+
+function updateSendBtn() {
+    sendBtn.disabled = !question.value.trim() && !attachedImage;
+}
+
+// ══════════════════════════════ THEME ════════════════════════════════════
+
+const savedTheme = localStorage.getItem("theme") || "dark";
+document.documentElement.dataset.theme = savedTheme;
+
+$("theme-toggle")?.addEventListener("click", () => {
+    const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem("theme", next);
+});
+
+// ══════════════════════════════ SIDEBAR ══════════════════════════════════
+
+$("sidebar-toggle")?.addEventListener("click", () => {
+    sidebar.classList.toggle("collapsed");
+});
+
+// ══════════════════════════════ RETRIEVAL MODE ════════════════════════════
+
+const modeDescs = {
+    hybrid: "Dense + BM25 fused with Reciprocal Rank Fusion",
+    dense:  "Vector similarity only (semantic search)",
+    sparse: "BM25 keyword matching only",
+};
+const retrieverLabels = {
+    hybrid: "Dense + BM25 RRF",
+    dense:  "Dense Only",
+    sparse: "BM25 Only",
 };
 
-// --- DOM ELEMENTS ---
-const elements = {
-    chatWindow: document.getElementById('chat-window'),
-    messagesContainer: document.querySelector('.messages-container'),
-    typingIndicator: document.getElementById('typing-indicator'),
-    chatForm: document.getElementById('chat-form'),
-    questionInput: document.getElementById('question'),
-    sendBtn: document.getElementById('send-btn'),
-    charCount: document.getElementById('char-count'),
-    sidebar: document.getElementById('sidebar'),
-    sidebarToggle: document.getElementById('sidebar-toggle'),
-    themeToggle: document.getElementById('theme-toggle'),
-    fileInput: document.getElementById('fileInput'),
-    attachBtn: document.getElementById('attachBtn'),
-    toast: document.getElementById('toast')
-};
+document.querySelectorAll(".mode-pill").forEach(pill => {
+    pill.addEventListener("click", () => {
+        document.querySelectorAll(".mode-pill").forEach(p => p.classList.remove("active"));
+        pill.classList.add("active");
+        currentMode = pill.dataset.mode;
+        // FIX: update mode-desc and retriever-label
+        if (modeDesc)       modeDesc.textContent       = modeDescs[currentMode] || "";
+        if (retrieverLabel) retrieverLabel.textContent  = retrieverLabels[currentMode] || currentMode;
+        showToast(`Retrieval mode: ${currentMode}`, "success");
+    });
+});
 
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
+// ══════════════════════════════ NEW CHAT ═════════════════════════════════
 
-function scrollToBottom(smooth = true) {
-    elements.chatWindow.scrollTo({
-        top: elements.chatWindow.scrollHeight,
-        behavior: smooth ? 'smooth' : 'auto'
+$("new-chat-btn")?.addEventListener("click", () => {
+    if (!confirm("Start a new session?")) return;
+    location.reload();
+});
+
+// ══════════════════════════════ CLEAR BUTTONS ════════════════════════════
+
+$("clear-btn")?.addEventListener("click", async () => {
+    if (!confirm("Clear conversation history?")) return;
+    try {
+        await fetch("/clear-cache", { method: "POST" });
+        location.reload();
+    } catch { showToast("Failed to clear cache", "error"); }
+});
+
+$("clear-cache-btn")?.addEventListener("click", async () => {
+    try {
+        await fetch("/clear-cache", { method: "POST" });
+        showToast("Cache cleared", "success");
+    } catch { showToast("Error clearing cache", "error"); }
+});
+
+// ══════════════════════════════ NAMESPACE SWITCHER ════════════════════════
+
+let nsOpen = false;
+
+// FIX: namespace dropdown was fully missing from JS
+nsBadge?.addEventListener("click", toggleNsDropdown);
+
+nsRefresh?.addEventListener("click", async () => {
+    nsRefresh.classList.add("spin");
+    await loadNamespaces();
+    setTimeout(() => nsRefresh.classList.remove("spin"), 500);
+});
+
+document.addEventListener("click", e => {
+    if (nsOpen && nsBadge && !nsBadge.contains(e.target) && nsDropdown && !nsDropdown.contains(e.target)) {
+        closeNsDropdown();
+    }
+});
+
+function toggleNsDropdown() {
+    if (nsOpen) { closeNsDropdown(); return; }
+    nsOpen = true;
+    if (nsDropdown) nsDropdown.style.display = "block";
+    loadNamespaces();
+}
+
+function closeNsDropdown() {
+    nsOpen = false;
+    if (nsDropdown) nsDropdown.style.display = "none";
+}
+
+async function loadNamespaces() {
+    if (nsDropList) nsDropList.innerHTML = '<div class="ns-loading">Loading…</div>';
+    try {
+        const r = await fetch("/namespaces");
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        const nsList = d.namespaces || [];
+        if (!nsDropList) return;
+        if (!nsList.length) {
+            nsDropList.innerHTML = '<div class="ns-loading">No namespaces yet</div>';
+            return;
+        }
+        nsDropList.innerHTML = "";
+        const currentNs = nsLabel?.textContent || "";
+        nsList.forEach(n => {
+            const el = document.createElement("div");
+            el.className = "ns-item" + (n.name === currentNs ? " active" : "");
+            el.innerHTML = `
+                <span class="ns-item-name">${n.name}</span>
+                <span class="ns-item-count">${n.vector_count} vecs · ${n.bm25_docs} bm25</span>
+            `;
+            el.addEventListener("click", () => switchNamespace(n.name));
+            nsDropList.appendChild(el);
+        });
+    } catch (e) {
+        if (nsDropList) nsDropList.innerHTML = `<div class="ns-loading" style="color:var(--red)">Error: ${e.message}</div>`;
+    }
+}
+
+async function switchNamespace(ns) {
+    try {
+        await fetch("/switch-namespace", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ namespace: ns }),
+        });
+        if (nsLabel) nsLabel.textContent = ns;
+        showToast(`Namespace: ${ns}`, "success");
+        closeNsDropdown();
+    } catch (e) {
+        showToast("Switch failed: " + e.message, "error");
+    }
+}
+
+// ══════════════════════════════ FILE UPLOAD ══════════════════════════════
+
+browseLink?.addEventListener("click", e => { e.stopPropagation(); fileInput.click(); });
+dropZone?.addEventListener("click", () => fileInput.click());
+$("attach-doc-btn")?.addEventListener("click", () => fileInput.click());
+
+// FIX: cancel button was never wired
+cancelQueueBtn?.addEventListener("click", () => {
+    pendingFiles = [];
+    renderFileQueue();
+});
+
+// Drag & drop
+dropZone?.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("over"); });
+dropZone?.addEventListener("dragleave", () => dropZone.classList.remove("over"));
+dropZone?.addEventListener("drop", e => {
+    e.preventDefault();
+    dropZone.classList.remove("over");
+    handleFileSelection([...e.dataTransfer.files]);
+});
+
+fileInput?.addEventListener("change", () => {
+    handleFileSelection([...fileInput.files]);
+    fileInput.value = "";
+});
+
+function handleFileSelection(files) {
+    const allowed = [".pdf", ".txt", ".md"];
+    const valid   = files.filter(f => allowed.some(ext => f.name.toLowerCase().endsWith(ext)));
+    const invalid = files.filter(f => !allowed.some(ext => f.name.toLowerCase().endsWith(ext)));
+    if (invalid.length) showToast(`Skipped ${invalid.length} unsupported file(s)`, "error");
+    if (!valid.length) return;
+    pendingFiles.push(...valid);
+    renderFileQueue();
+}
+
+function renderFileQueue() {
+    if (!pendingFiles.length) {
+        fileQueue.style.display = "none";
+        dropZone.style.display  = "";
+        return;
+    }
+    dropZone.style.display  = "none";
+    fileQueue.style.display = "flex";
+
+    queueList.innerHTML = "";
+    pendingFiles.forEach((f, i) => {
+        const item = document.createElement("div");
+        item.className = "queue-item";
+        item.innerHTML = `
+            <span class="file-icon">${fileIcon(f.name)}</span>
+            <span class="file-name">${f.name}</span>
+            <span class="file-size">${formatBytes(f.size)}</span>
+            <span class="remove-file" data-index="${i}">✕</span>
+        `;
+        queueList.appendChild(item);
+    });
+
+    // FIX: update upload-btn-label instead of clobbering the whole button innerHTML
+    if (uploadBtnLabel) {
+        uploadBtnLabel.textContent = `Upload ${pendingFiles.length} File${pendingFiles.length > 1 ? "s" : ""}`;
+    }
+
+    queueList.querySelectorAll(".remove-file").forEach(btn => {
+        btn.addEventListener("click", e => {
+            pendingFiles.splice(parseInt(e.target.dataset.index), 1);
+            renderFileQueue();
+        });
     });
 }
 
-function showTypingIndicator() {
-    if (elements.typingIndicator) {
-        elements.typingIndicator.style.display = 'flex';
-        scrollToBottom();
+uploadBtn?.addEventListener("click", uploadFiles);
+
+async function uploadFiles() {
+    if (!pendingFiles.length) return;
+
+    const multi = pendingFiles.length > 1;
+    fileQueue.style.display    = "none";
+    uploadProgress.style.display = "flex";
+    progressFill.style.width   = "0%";
+    if (progressPct) progressPct.textContent = "0%";
+    if (progressLabel) progressLabel.textContent = multi
+        ? `Uploading ${pendingFiles.length} files…`
+        : `Uploading ${pendingFiles[0].name}…`;
+
+    // FIX: render per-file status rows
+    if (perFileStatus) {
+        perFileStatus.innerHTML = "";
+        pendingFiles.forEach((f, i) => {
+            const row = document.createElement("div");
+            row.className = "pf-item processing";
+            row.id = `pf-row-${i}`;
+            row.innerHTML = `
+                <span class="pf-icon">⏳</span>
+                <span class="pf-name">${f.name}</span>
+                <span class="pf-chunks"></span>
+            `;
+            perFileStatus.appendChild(row);
+        });
+    }
+
+    setStatusBusy(true);
+
+    let fakePct = 0;
+    const ticker = setInterval(() => {
+        fakePct = Math.min(fakePct + 1.5, 88);
+        progressFill.style.width = fakePct + "%";
+        // FIX: update progress % label
+        if (progressPct) progressPct.textContent = Math.round(fakePct) + "%";
+    }, 100);
+
+    try {
+        let result;
+        if (multi) {
+            const form = new FormData();
+            pendingFiles.forEach(f => form.append("files", f));
+            const resp = await fetch("/upload/multiple", { method: "POST", body: form });
+            result = await resp.json();
+        } else {
+            const form = new FormData();
+            form.append("file", pendingFiles[0]);
+            const resp = await fetch("/upload", { method: "POST", body: form });
+            result = await resp.json();
+        }
+
+        clearInterval(ticker);
+        progressFill.style.width = "100%";
+        if (progressPct) progressPct.textContent = "100%";
+
+        if (result.error) {
+            showToast(`Upload error: ${result.error}`, "error");
+            markAllPfRows("err", "❌");
+        } else {
+            // FIX: update namespace badge
+            if (result.namespace && nsLabel) nsLabel.textContent = result.namespace;
+
+            // FIX: update chunks chip
+            let totalChunks = 0;
+            if (multi && result.results) {
+                Object.entries(result.results).forEach(([fn, info], i) => {
+                    const row = $(`pf-row-${i}`);
+                    if (row) {
+                        if (info.status === "ok") {
+                            row.className = "pf-item done";
+                            row.querySelector(".pf-icon").textContent   = "✅";
+                            row.querySelector(".pf-chunks").textContent = info.chunks + " chunks";
+                            totalChunks += info.chunks || 0;
+                        } else {
+                            row.className = "pf-item err";
+                            row.querySelector(".pf-icon").textContent   = "❌";
+                            row.querySelector(".pf-chunks").textContent = (info.error || "").slice(0, 30);
+                        }
+                    }
+                });
+            } else {
+                markAllPfRows("done", "✅", (result.chunks || 0) + " chunks");
+                totalChunks = result.chunks || 0;
+            }
+
+            // FIX: show chunk count in sidebar chip
+            if (statChunks) statChunks.textContent = totalChunks;
+            if (chunksChip) chunksChip.style.opacity = "1";
+
+            const ok  = multi ? Object.values(result.results || {}).filter(r => r.status === "ok") : [result];
+            const err = multi ? Object.values(result.results || {}).filter(r => r.status === "error") : [];
+            const msg = multi
+                ? `✅ ${ok.length} file(s) indexed → ns: ${result.namespace}${err.length ? `, ${err.length} failed` : ""} (${result.time})`
+                : `✅ ${result.filename} — ${result.chunks} chunks in ${result.time}`;
+
+            if (progressLabel) progressLabel.textContent = msg.replace("✅ ", "");
+            showToast(msg, "success", 5000);
+            appendSystemMessage(msg);
+        }
+
+    } catch (err) {
+        clearInterval(ticker);
+        markAllPfRows("err", "❌");
+        showToast("Upload failed: " + err.message, "error");
+    } finally {
+        setStatusBusy(false);
+        setTimeout(() => {
+            uploadProgress.style.display = "none";
+            dropZone.style.display = "";
+            pendingFiles = [];
+        }, 3000);
     }
 }
 
-function hideTypingIndicator() {
-    if (elements.typingIndicator) {
-        elements.typingIndicator.style.display = 'none';
-    }
+function markAllPfRows(cls, icon, info = "") {
+    document.querySelectorAll(".pf-item").forEach(row => {
+        row.className = "pf-item " + cls;
+        const ic = row.querySelector(".pf-icon"); if (ic) ic.textContent = icon;
+        const ch = row.querySelector(".pf-chunks"); if (ch) ch.textContent = info;
+    });
 }
 
-function disableInput(disabled = true) {
-    elements.questionInput.disabled = disabled;
-    elements.sendBtn.disabled = disabled;
-    state.isTyping = disabled;
-}
+// ══════════════════════════════ IMAGE ATTACH ══════════════════════════════
 
-function showToast(message, duration = 3000) {
-    elements.toast.textContent = message;
-    elements.toast.classList.add('show');
-    
-    setTimeout(() => {
-        elements.toast.classList.remove('show');
-    }, duration);
-}
+attachImgBtn?.addEventListener("click", () => imageInput.click());
 
-// ============================================================================
-// AUTO-RESIZE TEXTAREA
-// ============================================================================
-function autoResizeTextarea() {
-    elements.questionInput.style.height = 'auto';
-    elements.questionInput.style.height = elements.questionInput.scrollHeight + 'px';
-}
+imageInput?.addEventListener("change", () => {
+    const file = imageInput.files[0];
+    if (!file) return;
+    imageInput.value = "";
 
-elements.questionInput.addEventListener('input', () => {
-    autoResizeTextarea();
-    updateCharCount();
+    const reader = new FileReader();
+    reader.onload = e => {
+        attachedImage = { dataUrl: e.target.result, base64: e.target.result.split(",")[1] };
+        imgThumb.src           = e.target.result;
+        imgStrip.style.display = "flex";             // FIX: was "inline-flex", CSS expects flex
+        if (inputWrapper) inputWrapper.classList.add("has-image"); // FIX: was never toggled
+        updateSendBtn();
+        showToast("Image attached — will send with your next message", "success");
+    };
+    reader.readAsDataURL(file);
 });
 
-// ============================================================================
-// CHARACTER COUNTER
-// ============================================================================
-function updateCharCount() {
-    const length = elements.questionInput.value.length;
-    const max = 500;
-    elements.charCount.textContent = `${length} / ${max}`;
-    
-    if (length > max * 0.9) {
-        elements.charCount.style.color = 'var(--error)';
-    } else if (length > max * 0.75) {
-        elements.charCount.style.color = 'var(--warning)';
-    } else {
-        elements.charCount.style.color = 'var(--text-tertiary)';
+removeImgBtn?.addEventListener("click", () => {
+    attachedImage = null;
+    imgStrip.style.display = "none";
+    imgThumb.src = "";
+    if (inputWrapper) inputWrapper.classList.remove("has-image"); // FIX: was never toggled
+    updateSendBtn();
+});
+
+// ══════════════════════════════ TYPING CYCLE ══════════════════════════════
+
+// FIX: stopTypingCycle was called 4× but never defined — caused a ReferenceError crash
+const typingMessages = [
+    "Generating answer…",
+];
+let _typingTimer = null;
+let _typingIdx   = 0;
+
+function startTypingCycle() {
+    _typingIdx = 0;
+    if (typingStatus) typingStatus.textContent = typingMessages[0];
+    _typingTimer = setInterval(() => {
+        _typingIdx = (_typingIdx + 1) % typingMessages.length;
+        if (typingStatus) typingStatus.textContent = typingMessages[_typingIdx];
+    }, 1800);
+}
+
+function stopTypingCycle() {
+    clearInterval(_typingTimer);
+    _typingTimer = null;
+}
+
+// ══════════════════════════════ CHAT ══════════════════════════════════════
+
+// FIX: send button was always disabled; needs to enable when text is typed
+question?.addEventListener("input", () => {
+    autoResize(question);
+    const len = question.value.length;
+    charCount.textContent = `${len} / ${MAX_CHARS}`;
+    charCount.style.color = len > MAX_CHARS * 0.9 ? "#F87171" : "";
+    updateSendBtn(); // FIX: re-evaluate disabled state on every keystroke
+});
+
+question?.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+});
+
+sendBtn?.addEventListener("click", sendMessage);
+
+// FIX: suggestion cards used wrong span selector — was picking up the icon span
+document.querySelectorAll(".suggestion-card").forEach(card => {
+    card.addEventListener("click", () => {
+        question.value = card.dataset.q || "";
+        autoResize(question);
+        updateSendBtn();
+        question.focus();
+    });
+});
+
+async function sendMessage() {
+    const text = question.value.trim();
+    if ((!text && !attachedImage) || isGenerating) return;
+    if (text.length > MAX_CHARS) { showToast("Message too long", "error"); return; }
+
+    isGenerating     = true;
+    sendBtn.disabled = true;
+    setStatusBusy(true);
+
+    const welcome = $("welcome");
+    if (welcome) welcome.style.display = "none";
+
+    appendUserMessage(text, attachedImage?.dataUrl);
+    question.value = "";
+    autoResize(question);
+    charCount.textContent = `0 / ${MAX_CHARS}`;
+
+    const imgB64  = attachedImage?.base64 || null;
+    attachedImage = null;
+    imgStrip.style.display = "none";
+    imgThumb.src = "";
+    if (inputWrapper) inputWrapper.classList.remove("has-image");
+    updateSendBtn();
+
+    typingEl.style.display = "flex";
+    startTypingCycle(); // FIX: now defined above
+    scrollBottom();
+
+    const t0 = performance.now();
+
+    try {
+        const resp = await fetch("/chat/stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                question:     text,
+                session_id:   SESSION_ID,
+                image_base64: imgB64,
+                mode:         currentMode,
+            }),
+        });
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+        // Keep typing visible until first chunk arrives (no blank bubble flash)
+        let aiBubble  = null;
+        let contentEl = null;
+        const reader  = resp.body.getReader();
+        const dec     = new TextDecoder();
+        let rawText   = "";
+        let buf       = "";
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buf += dec.decode(value, { stream: true });
+            const lines = buf.split("\n");
+            buf = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith("data: ")) continue;
+                try {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.chunk) {
+                        // First chunk: hide typing indicator, create bubble
+                        if (!aiBubble) {
+                            typingEl.style.display = "none";
+                            stopTypingCycle();
+                            aiBubble  = appendAIMessage("");
+                            contentEl = aiBubble.querySelector(".msg-content");
+                        }
+                        rawText += data.chunk;
+                        contentEl.innerHTML = marked.parse(rawText);
+                        contentEl.querySelectorAll("pre code").forEach(el => hljs.highlightElement(el));
+                        scrollBottom(false);
+                    }
+                    if (data.done) {
+                        // FIX: update namespace label from stream done event
+                        if (data.namespace && nsLabel) nsLabel.textContent = data.namespace;
+
+                        // FIX: show latency in sidebar chip and topbar perf badge
+                        const ms = Math.round(performance.now() - t0);
+                        if (statLatency) statLatency.textContent = ms;
+                        if (latencyChip) latencyChip.style.opacity = "1";
+                        if (perfText)   perfText.textContent = ms + "ms";
+                        if (perfBadge)  perfBadge.style.display = "block";
+                    }
+                } catch { /* ignore partial JSON lines */ }
+            }
+        }
+
+        // Safety: if stream ended with zero chunks (error path)
+        if (!aiBubble) {
+            typingEl.style.display = "none";
+            stopTypingCycle();
+            aiBubble = appendAIMessage("*(No response received — please try again)*");
+        }
+
+        // FIX: update message count chip
+        const msgCount = $("stat-msgs");
+        if (msgCount) msgCount.textContent = parseInt(msgCount.textContent || "0") + 2;
+
+        // Wire copy button on fresh bubble
+        aiBubble.querySelector(".copy-btn")?.addEventListener("click", () => {
+            navigator.clipboard.writeText(rawText).then(() => showToast("Copied!", "success"));
+        });
+
+        // FIX: add question to sidebar history
+        if (text) addToHistory(text);
+
+    } catch (err) {
+        typingEl.style.display = "none";
+        stopTypingCycle(); // FIX: was crashing here before (undefined)
+        appendAIMessage(`⚠️ Error: ${err.message}`);
+        showToast("Request failed", "error");
+    } finally {
+        isGenerating     = false;
+        sendBtn.disabled = false;
+        setStatusBusy(false);
+        updateSendBtn();
+        scrollBottom();
     }
 }
 
-// ============================================================================
-// MESSAGE CREATION
-// ============================================================================
-function createMessageHTML(content, type = 'assistant') {
-    const isUser = type === 'user';
-    
-    return `
-        <div class="message-group ${isUser ? 'user-message' : 'assistant-message'}">
-            ${!isUser ? `
-                <div class="message-avatar">
-                    <div class="avatar assistant-avatar">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-                        </svg>
-                    </div>
-                </div>
-            ` : ''}
-            <div class="message-bubble">
-                <div class="message-text ${!isUser ? 'markdown-content' : ''}">
-                    ${content}
-                </div>
-                ${!isUser ? `
-                    <div class="message-actions">
-                        <button class="action-btn copy-btn" title="Copy">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                            </svg>
-                        </button>
-                        <button class="action-btn like-btn" title="Good">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/>
-                            </svg>
-                        </button>
-                        <button class="action-btn dislike-btn" title="Bad">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/>
-                            </svg>
-                        </button>
-                    </div>
-                ` : ''}
-            </div>
-            ${isUser ? `
-                <div class="message-avatar">
-                    <div class="avatar user-avatar">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                            <circle cx="12" cy="7" r="4"/>
-                        </svg>
-                    </div>
-                </div>
-            ` : ''}
+// ── Message builders ──────────────────────────────────────────────────────
+
+function appendUserMessage(text, imageUrl = null) {
+    const div = document.createElement("div");
+    div.className = "msg user-msg";
+    div.style.animation = "fade-up .35s cubic-bezier(.16,1,.3,1) both";
+
+    let extra = "";
+    if (imageUrl) {
+        extra = `<img src="${imageUrl}" style="max-height:120px;border-radius:8px;margin-bottom:6px;display:block;">`;
+    }
+
+    div.innerHTML = `
+        <div class="msg-content">${extra}${escapeHtml(text)}</div>
+        <div class="avatar user-av">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                <circle cx="12" cy="7" r="4"/>
+            </svg>
         </div>
     `;
+    messages.appendChild(div);
+    return div;
 }
 
-function appendMessage(content, type = 'assistant') {
-    const messageHTML = createMessageHTML(content, type);
-    
-    if (!elements.messagesContainer) {
-        // Create messages container if it doesn't exist
-        const container = document.createElement('div');
-        container.className = 'messages-container';
-        elements.chatWindow.appendChild(container);
-        elements.messagesContainer = container;
-        
-        // Remove welcome screen
-        const welcomeScreen = elements.chatWindow.querySelector('.welcome-screen');
-        if (welcomeScreen) {
-            welcomeScreen.remove();
-        }
-    }
-    
-    elements.messagesContainer.insertAdjacentHTML('beforeend', messageHTML);
-    
-    // Add event listeners to new message actions
-    const lastMessage = elements.messagesContainer.lastElementChild;
-    attachMessageActions(lastMessage);
-    
-    // Render markdown for assistant messages
-    if (type === 'assistant') {
-        renderMarkdown(lastMessage.querySelector('.markdown-content'));
-    }
-    
-    scrollToBottom();
-    state.messageCount++;
-}
+function appendAIMessage(html) {
+    const div = document.createElement("div");
+    div.className = "msg ai-msg";
+    div.style.animation = "fade-up .35s cubic-bezier(.16,1,.3,1) both";
+    div.innerHTML = `
+        <div class="avatar ai-av">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="url(#av-dyn)" stroke-width="2">
+                <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/>
+                <defs><linearGradient id="av-dyn" x1="2" y1="2" x2="22" y2="22">
+                    <stop stop-color="#7DF9C4"/><stop offset="1" stop-color="#6366F1"/>
+                </linearGradient></defs>
+            </svg>
+        </div>
+        <div class="msg-body">
+            <div class="msg-content markdown-content">${html ? marked.parse(html) : ""}</div>
+            <div class="msg-actions">
+                <button class="msg-act copy-btn" title="Copy">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2"/>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                    </svg>
+                </button>
+                <button class="msg-act like-btn" title="Helpful">👍</button>
+                <button class="msg-act dislike-btn" title="Not helpful">👎</button>
+            </div>
+        </div>
+    `;
+    messages.appendChild(div);
 
-// ============================================================================
-// MESSAGE ACTIONS
-// ============================================================================
-function attachMessageActions(messageElement) {
-    const copyBtn = messageElement.querySelector('.copy-btn');
-    const likeBtn = messageElement.querySelector('.like-btn');
-    const dislikeBtn = messageElement.querySelector('.dislike-btn');
-    
-    if (copyBtn) {
-        copyBtn.addEventListener('click', () => {
-            const text = messageElement.querySelector('.message-text').textContent;
-            copyToClipboard(text);
-        });
-    }
-    
-    if (likeBtn) {
-        likeBtn.addEventListener('click', (e) => handleFeedback(e, 'like'));
-    }
-    
-    if (dislikeBtn) {
-        dislikeBtn.addEventListener('click', (e) => handleFeedback(e, 'dislike'));
-    }
-}
-
-async function copyToClipboard(text) {
-    try {
-        await navigator.clipboard.writeText(text);
-        showToast('✅ Copied to clipboard!');
-    } catch (err) {
-        showToast('❌ Failed to copy');
-    }
-}
-
-function handleFeedback(event, type) {
-    const btn = event.currentTarget;
-    const actions = btn.parentElement;
-    const allBtns = actions.querySelectorAll('.action-btn');
-    
-    // Toggle active state
-    if (btn.classList.contains('active')) {
-        btn.classList.remove('active');
-        showToast('Feedback removed');
-    } else {
-        allBtns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        showToast(`${type === 'like' ? '👍' : '👎'} Feedback recorded`);
-    }
-}
-
-// ============================================================================
-// MARKDOWN RENDERING
-// ============================================================================
-function renderMarkdown(element) {
-    if (!element) return;
-    
-    const rawText = element.textContent;
-    
-    // Configure marked options
-    marked.setOptions({
-        highlight: function(code, lang) {
-            if (lang && hljs.getLanguage(lang)) {
-                return hljs.highlight(code, { language: lang }).value;
-            }
-            return hljs.highlightAuto(code).value;
-        },
-        breaks: true,
-        gfm: true
+    // Copy handler on bubble itself
+    div.querySelector(".copy-btn")?.addEventListener("click", () => {
+        const t = div.querySelector(".msg-content")?.innerText || "";
+        navigator.clipboard.writeText(t).then(() => showToast("Copied!", "success"));
     });
-    
-    element.innerHTML = marked.parse(rawText);
+
+    return div;
 }
 
-// ============================================================================
-// STREAMING MESSAGE
-// ============================================================================
-async function streamMessage(text) {
-    const messageHTML = createMessageHTML('', 'assistant');
-    elements.messagesContainer.insertAdjacentHTML('beforeend', messageHTML);
-    
-    const messageElement = elements.messagesContainer.lastElementChild;
-    const textElement = messageElement.querySelector('.message-text');
-    
-    // Stream character by character
-    let index = 0;
-    const speed = 15; // ms per character
-    
-    return new Promise((resolve) => {
-        const interval = setInterval(() => {
-            if (index < text.length) {
-                textElement.textContent = text.slice(0, index + 1);
-                index++;
-                
-                // Scroll every 50 characters
-                if (index % 50 === 0) {
-                    scrollToBottom();
-                }
-            } else {
-                clearInterval(interval);
-                
-                // Render markdown
-                renderMarkdown(textElement);
-                attachMessageActions(messageElement);
-                scrollToBottom();
-                
-                resolve();
-            }
-        }, speed);
+function appendSystemMessage(text) {
+    const div = document.createElement("div");
+    div.style.cssText = "text-align:center;font-size:12px;color:var(--text-muted);padding:8px 0;animation:fade-up .3s ease both";
+    div.textContent = text;
+    messages.appendChild(div);
+    scrollBottom();
+}
+
+function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// ── FIX: sidebar history – was never populated dynamically ────────────────
+function addToHistory(q) {
+    if (!historyList) return;
+    // Remove "no history" placeholder if present
+    const empty = historyList.querySelector(".empty-hint");
+    if (empty) empty.remove();
+
+    const item = document.createElement("div");
+    item.className = "history-item";
+    item.dataset.q = q;
+    item.innerHTML = `
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
+        <span>${q.slice(0, 36)}${q.length > 36 ? "…" : ""}</span>
+    `;
+    // Click → re-fill the input
+    item.addEventListener("click", () => {
+        question.value = item.dataset.q;
+        autoResize(question);
+        updateSendBtn();
+        question.focus();
     });
+
+    historyList.insertBefore(item, historyList.firstChild);
+    // Keep max 8 entries
+    while (historyList.querySelectorAll(".history-item").length > 8) {
+        historyList.lastElementChild?.remove();
+    }
 }
 
-// ============================================================================
-// FORM SUBMISSION
-// ============================================================================
-elements.chatForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    
-    const question = elements.questionInput.value.trim();
-    if (!question || state.isTyping) return;
-    
-    // Add user message
-    appendMessage(question, 'user');
-    
-    // Clear input
-    elements.questionInput.value = '';
-    elements.questionInput.style.height = 'auto';
-    updateCharCount();
-    
-    // Show typing
-    disableInput(true);
-    showTypingIndicator();
-    
-    try {
-        const response = await fetch('/chat', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ question })
-        });
-        
-        const data = await response.json();
-        
-        hideTypingIndicator();
-        
-        if (data.error) {
-            appendMessage(`⚠️ ${data.error}`, 'assistant');
-            showToast('❌ ' + data.error);
-            return;
-        }
-        
-        // Extract plain text from HTML
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = data.answer;
-        const plainText = tempDiv.textContent || tempDiv.innerText;
-        
-        // Stream the message
-        await streamMessage(plainText);
-        
-        // Show latency if available
-        if (data.latency) {
-            console.log(`Response time: ${data.latency}ms`);
-        }
-        
-    } catch (error) {
-        hideTypingIndicator();
-        appendMessage(`❌ Error: ${error.message}`, 'assistant');
-        showToast('❌ Request failed');
-    } finally {
-        disableInput(false);
-        elements.questionInput.focus();
-    }
-});
-
-// ============================================================================
-// FILE UPLOAD
-// ============================================================================
-elements.attachBtn.addEventListener('click', () => {
-    elements.fileInput.click();
-});
-
-elements.fileInput.addEventListener('change', async () => {
-    const file = elements.fileInput.files[0];
-    if (!file) return;
-    
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    showToast('📤 Uploading document...');
-    
-    try {
-        const response = await fetch('/upload', {
-            method: 'POST',
-            body: formData
-        });
-        
-        const data = await response.json();
-        
-        if (data.error) {
-            showToast('❌ ' + data.error);
-            return;
-        }
-        
-        showToast(`✅ Uploaded ${data.filename} • ${data.chunks} chunks`);
-        
-        // Add system message
-        appendMessage(`📄 Document uploaded: **${data.filename}**\n${data.chunks} text chunks indexed and ready for questions.`, 'assistant');
-        
-    } catch (err) {
-        showToast('❌ Upload failed');
-    } finally {
-        elements.fileInput.value = '';
-    }
-});
-
-// ============================================================================
-// KEYBOARD SHORTCUTS
-// ============================================================================
-elements.questionInput.addEventListener('keydown', (e) => {
-    // Enter to send (without Shift)
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        elements.chatForm.dispatchEvent(new Event('submit'));
-    }
-    
-    // Shift+Enter for new line (default behavior)
-});
-
-// ============================================================================
-// SIDEBAR TOGGLE
-// ============================================================================
-elements.sidebarToggle.addEventListener('click', () => {
-    elements.sidebar.classList.toggle('collapsed');
-});
-
-// Close sidebar on mobile when clicking outside
-document.addEventListener('click', (e) => {
-    if (window.innerWidth <= 768) {
-        if (!elements.sidebar.contains(e.target) && !elements.sidebarToggle.contains(e.target)) {
-            elements.sidebar.classList.add('collapsed');
-        }
-    }
-});
-
-// ============================================================================
-// THEME TOGGLE
-// ============================================================================
-elements.themeToggle.addEventListener('click', () => {
-    document.body.classList.toggle('dark-mode');
-    
-    const isDark = document.body.classList.contains('dark-mode');
-    state.currentTheme = isDark ? 'dark' : 'light';
-    localStorage.setItem('theme', state.currentTheme);
-});
-
-// Load saved theme
-if (state.currentTheme === 'dark') {
-    document.body.classList.add('dark-mode');
-}
-
-// ============================================================================
-// WELCOME SUGGESTIONS
-// ============================================================================
-document.querySelectorAll('.suggestion-card').forEach(card => {
-    card.addEventListener('click', () => {
-        const question = card.dataset.question;
-        elements.questionInput.value = question;
-        elements.questionInput.focus();
-        autoResizeTextarea();
-        updateCharCount();
+// ── Wire existing server-rendered copy buttons ────────────────────────────
+document.querySelectorAll(".copy-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+        const text = btn.closest(".msg-body")?.querySelector(".msg-content")?.innerText || "";
+        navigator.clipboard.writeText(text).then(() => showToast("Copied!", "success"));
     });
 });
 
-// ============================================================================
-// NEW CHAT
-// ============================================================================
-document.getElementById('new-chat-btn')?.addEventListener('click', () => {
-    if (confirm('Start a new chat? Current conversation will be cleared.')) {
-        location.reload();
-    }
-});
+// ── Highlight existing server-rendered code blocks ────────────────────────
+document.querySelectorAll("pre code").forEach(el => hljs.highlightElement(el));
 
-// ============================================================================
-// CLEAR HISTORY
-// ============================================================================
-document.getElementById('clear-history-btn')?.addEventListener('click', async () => {
-    if (confirm('Clear all chat history? This cannot be undone.')) {
-        try {
-            const response = await fetch('/clear-cache', {
-                method: 'DELETE'
-            });
-            
-            if (response.ok) {
-                showToast('✅ History cleared');
-                setTimeout(() => location.reload(), 1000);
-            } else {
-                showToast('❌ Failed to clear history');
-            }
-        } catch (err) {
-            showToast('❌ Request failed');
-        }
-    }
-});
-
-// ============================================================================
-// EXPORT CHAT
-// ============================================================================
-document.getElementById('export-btn')?.addEventListener('click', () => {
-    const messages = Array.from(document.querySelectorAll('.message-group'));
-    
-    const text = messages.map(msg => {
-        const isUser = msg.classList.contains('user-message');
-        const content = msg.querySelector('.message-text').textContent;
-        return `${isUser ? 'You' : 'Assistant'}: ${content}`;
-    }).join('\n\n' + '='.repeat(50) + '\n\n');
-    
-    const blob = new Blob([text], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `rag-chat-${new Date().toISOString().slice(0, 10)}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
-    
-    showToast('✅ Chat exported!');
-});
-
-// ============================================================================
-// SETTINGS
-// ============================================================================
-document.getElementById('settings-btn')?.addEventListener('click', async () => {
-    try {
-        const response = await fetch('/stats');
-        const data = await response.json();
-        
-        showToast(`
-📊 System Stats
-⏱️ Startup: ${data.startup_time}
-💾 Cache: ${data.cache?.size || 0} queries
-💬 Messages: ${state.messageCount}
-        `.trim(), 5000);
-    } catch (err) {
-        showToast('❌ Failed to load stats');
-    }
-});
-
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
-window.addEventListener('load', () => {
-    // Render existing markdown
-    document.querySelectorAll('.markdown-content').forEach(el => {
-        renderMarkdown(el);
-    });
-    
-    // Attach actions to existing messages
-    document.querySelectorAll('.message-group').forEach(msg => {
-        attachMessageActions(msg);
-    });
-    
-    // Focus input
-    elements.questionInput.focus();
-    
-    // Scroll to bottom
-    scrollToBottom(false);
-    
-    console.log('🚀 RAG Assistant initialized');
-});
-
-// Auto-scroll on resize
-window.addEventListener('resize', () => {
-    scrollToBottom(false);
-});
+// ── Init ──────────────────────────────────────────────────────────────────
+updateSendBtn();       // set correct initial disabled state
+scrollBottom(false);   // scroll to bottom on page load

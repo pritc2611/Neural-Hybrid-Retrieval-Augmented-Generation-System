@@ -2,3 +2,8 @@
 .gitignoer
 RAGtesting.ipynb
 model/
+/model/
+*__pycache__
+model
+README.md
+*.env.example

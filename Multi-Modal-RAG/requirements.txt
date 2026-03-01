@@ -7,7 +7,6 @@ langchain-core
 langchain-community
 langchain-huggingface
 langchain_text_splitters
-langchain_google_genai
 pinecone
 pinecone-text
 uvicorn[standard]
@@ -21,3 +20,5 @@ transformers
 numpy
 aiohttp
 cachetools
+langsmith
+langchain_core
