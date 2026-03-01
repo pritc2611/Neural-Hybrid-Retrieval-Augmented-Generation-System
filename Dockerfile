@@ -35,7 +35,7 @@ ENV PATH=/usr/local/bin:$PATH
 COPY  static/  .
 COPY templates .
 COPY utility .
-COPY app.py .
+COPY app/app.py .
  COPY .env .
 
 EXPOSE 7000
