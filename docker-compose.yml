@@ -1,7 +1,7 @@
 services:
   embedding:
     build:
-      context: ./embed_service_model/
+      context: ./embed_service_model/dockerfile
       dockerfile: dockerfile
     container_name: embedding_service
     ports:
@@ -12,7 +12,7 @@ services:
   ragapp:
     build:
       context: .
-      dockerfile: dockerfile
+      dockerfile: Dockerfile
     image: rag_service:latest
     container_name: rag_app
     ports:
