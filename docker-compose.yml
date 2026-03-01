@@ -3,7 +3,7 @@ version: "3.9"
 services:
   embedding:
     build:
-      context: embed_service_model/dockerfile
+      context: ./Multi-Modal-RAG/embed_service_model/
       dockerfile: Dockerfile
     container_name: embedding_service
     ports:
