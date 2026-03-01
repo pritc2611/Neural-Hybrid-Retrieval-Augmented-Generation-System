@@ -20,7 +20,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker compose up -d --build .
+          docker compose up -d --build
 
       - name: Check required secrets
         run: |
