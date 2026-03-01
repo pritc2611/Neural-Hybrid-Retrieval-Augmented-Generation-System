@@ -423,7 +423,7 @@ SPARSE_WEIGHT        = 0.4
 ### 1. Clone and install dependencies
 
 ```bash
-git clone https://github.com/pritc2611/neural-rag.git
+git clone https://github.com/pritc2611/Neural-Hybrid-Retrieval-Augmented-Generation-System
 cd neural-rag
 
 pip install -r requirements.txt
