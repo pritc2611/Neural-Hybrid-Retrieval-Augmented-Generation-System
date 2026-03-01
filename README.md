@@ -536,7 +536,7 @@ The UI is a single-page application served by Jinja2. It communicates with the b
 
 ---
 
-## Performance Design
+## Solve Problems (Design The Performance)
 
 ### Why ProcessPoolExecutor for extraction?
 
@@ -621,22 +621,10 @@ The BM25 index is a pure Python implementation with no external dependencies. It
 | Namespace max length | Pinecone namespace names are capped at 63 characters. The merged namespace builder truncates each filename stem to 20 characters before joining. |
 | Redis port | Hardcoded to `17564`. Change `init_storage()` if your Redis uses port `6379`. |
 
----
 
-## Roadmap
-
-- [ ] **BM25 persistence** — serialize/deserialize index to Redis or disk on startup/shutdown  
-- [ ] **Re-ranking** — add a cross-encoder re-ranker pass after RRF fusion for higher precision  
-- [ ] **Streaming upload progress** — WebSocket or SSE for real-time per-chunk progress during large uploads  
-- [ ] **Image embeddings** — CLIP or BLIP-2 embeddings for image content stored in Pinecone alongside text chunks  
-- [ ] **Multi-user sessions** — session isolation with auth middleware  
-- [ ] **Document management UI** — list, preview, and delete individual documents from namespaces  
-- [ ] **Evaluation harness** — automated retrieval quality metrics (MRR, NDCG, Recall@K) against a test set  
-
----
 
 <div align="center">
 
-Built with FastAPI · Pinecone · Gemini · sentence-transformers · LangChain
+Built with FastAPI · Pinecone · Huggingface-endpoint · sentence-transformers · LangChain
 
 </div>
