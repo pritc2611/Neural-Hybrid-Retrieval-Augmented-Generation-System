@@ -9,5 +9,4 @@ torch==2.2.2+cpu
 
 numpy==1.26.4
 pillow
-multiprocessing
 sentence-transformers
