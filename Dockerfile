@@ -32,11 +32,11 @@ COPY --from=builder /dependencies /usr/local
 ENV PATH=/usr/local/bin:$PATH
 
 # 🔹 Copy app last
-COPY  static/  .
-COPY templates .
-COPY utility .
-COPY app/app.py .
- COPY .env .
+COPY  Multi-Modal-RAG/static/  .
+COPY Multi-Modal-RAG/templates .
+COPY Multi-Modal-RAG/utility .
+COPY Multi-Modal-RAG/app/app.py .
+ COPY Multi-Modal-RAG/.env .
 
 EXPOSE 7000
 
