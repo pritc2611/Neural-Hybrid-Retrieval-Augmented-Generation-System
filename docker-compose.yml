@@ -1,7 +1,7 @@
 services:
   embedding:
     build:
-      context: ./embed_service_model/dockerfile
+      context: ./embed_service_model
       dockerfile: dockerfile
     container_name: embedding_service
     ports:
