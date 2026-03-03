@@ -920,3 +920,4 @@ body {
     .suggestion-grid { grid-template-columns: 1fr; }
     .user-msg .msg-content,.msg-body { max-width: 90%; }
 }
+
