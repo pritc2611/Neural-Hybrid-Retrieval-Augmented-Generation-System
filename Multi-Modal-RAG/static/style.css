@@ -174,7 +174,7 @@ body {
     transition: color var(--dur);
 }
 .refresh-sessions-btn:hover { color: var(--blue); }
-.refresh-sessions-btn.spinning svg { animation: spin .5s linear; }
+.refresh-sessions-btn.spinning svg { animation: spin 1s linear; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* Sidebar sections */
@@ -473,7 +473,7 @@ body {
     background: var(--surface2);
     border: 1px solid var(--border);
     border-radius: var(--r-md);
-    color: var(--text2);
+    color: #e4e0da;
     font-size: 12.5px;
     font-weight: 500;
     cursor: pointer;
@@ -590,7 +590,7 @@ body {
     animation: fade-up .5s var(--ease) both;
     gap: 12px;
 }
-.welcome-icon { animation: float 4s ease-in-out infinite; }
+.welcome-icon { animation: float 2s ease-in-out infinite; }
 @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
 .welcome-screen h2 {
     font-family: 'Space Grotesk', sans-serif;

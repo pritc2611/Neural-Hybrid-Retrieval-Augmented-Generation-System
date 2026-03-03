@@ -687,7 +687,7 @@ function upsertSessionInSidebar(sessionId, title, preview) {
 
 
 
-const typingMessages = ["Thinking…","Retrieving context…","Generating answer…"];
+const typingMessages = ["Retrieving context…","Thinking…","Generating answer…"];
 let _typingTimer = null, _typingIdx = 0;
 
 function startTypingCycle() {

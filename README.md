@@ -68,9 +68,9 @@ When multiple documents are uploaded together, all chunks land in a single merge
 └──────┬──────────────────────────────────────┬───────────────────┘
        │ asyncio.gather                       │ LangChain Chain
 ┌──────▼──────────┐                 ┌─────────▼─────────────────┐
-│  Embedding Svc  │                 │     LLM  (Gemini)         │
-│  modelapi.py    │                 │  gemini-2.5-flash-lite    │
+│  Embedding Svc  │                 │     LLM                   │
 │  port 8001      │                 │  streaming=True           │
+│ embed_service.py│                 │                           │
 │                 │                 └───────────────────────────┘
 │  ProcessPool    │
 │  N workers      │     ┌──────────────────────────────────────┐
@@ -119,7 +119,7 @@ A dedicated FastAPI microservice that hosts the sentence-transformer model. Runs
 
 ---
 
-### `utility/utils.py` — Core RAG Engine
+### `utility` — Core RAG Engine
 
 The heart of the system. 718 lines covering retrieval, embedding, document processing, storage, caching, and the LangChain chain assembly.
 
@@ -151,18 +151,6 @@ When multiple files are uploaded together, the system builds a *combined namespa
 ---
 
 ## Technical Metrics
-
-### Codebase
-
-| File | Lines | Purpose |
-|---|---|---|
-| `utility/utils.py` | 718 | Core engine: retrieval, embedding, storage, chain |
-| `static/style.css` | 648 | UI design system, 26 CSS custom properties |
-| `static/script.js` | 518 | Frontend controller, all 57 HTML IDs wired |
-| `app.py` | 268 | FastAPI routes, 10 endpoints |
-| `templates/index.html` | 338 | Jinja2 template, 57 element IDs |
-| `modelapi.py` | 178 | Embedding microservice |
-| **Total** | **2,668** | |
 
 ### Retrieval Configuration
 
@@ -331,7 +319,7 @@ Namespace updated → current_namespace
 
 ## API Reference
 
-### RAG Application (port 8000)
+### RAG Application (port 7000)
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -355,21 +343,7 @@ Namespace updated → current_namespace
 }
 ```
 
-**Upload multiple response:**
-```json
-{
-  "status": "success",
-  "results": {
-    "doc_a.pdf": { "status": "ok", "chunks": 37 },
-    "doc_b.md":  { "status": "ok", "chunks": 19 }
-  },
-  "total_files": 2,
-  "time": "14.3s",
-  "namespace": "doc_a__doc_b"
-}
-```
-
-### Embedding Service (port 8001)
+### Embedding Service (port 8000)
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -388,7 +362,7 @@ Namespace updated → current_namespace
 
 ## Configuration
 
-All tunable parameters are defined at the top of `utility/utils.py`:
+All tunable parameters are defined at the top of `utility/config.py`:
 
 ```python
 # Memory
@@ -443,7 +417,7 @@ cp .env.example .env
 ### 3. Start the embedding service
 
 ```bash
-uvicorn modelapi:app --host 0.0.0.0 --port 7000 --workers 1
+uvicorn embed_service:app --host 0.0.0.0 --port 7000 --workers 1
 ```
 
 > **Note:** Use `--workers 1` — the embedding service manages its own internal `ProcessPoolExecutor`. Multiple uvicorn workers would each spawn their own pool, multiplying memory usage.
@@ -451,7 +425,7 @@ uvicorn modelapi:app --host 0.0.0.0 --port 7000 --workers 1
 ### 4. Start the RAG application
 
 ```bash
-uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 5. Open the UI
@@ -473,10 +447,16 @@ neural-rag/
 |    └── app.py
 |                           # FastAPI application
 ├── embed_service_model/
-|     └──embed_service.py   # Embedding microservice (ProcessPool)
+|     └── embed_service.py   # Embedding microservice (ProcessPool)
 │
 ├── utility/
-│   └── utils.py            # Core engine: retrieval, chains, storage
+│   ├── __init__.py
+|   ├── chain.py             
+|   ├── config.py                 
+|   ├── embedding.py
+|   ├── ingestions.py
+|   ├── retriver.py
+|   └──storage.py            
 │
 ├── templates/
 │   └── index.html          # Jinja2 chat UI template (57 element IDs)
@@ -492,55 +472,11 @@ neural-rag/
 
 ---
 
-## Frontend Features
+## Design The Performance With Asynchronous Programing To Solve Letency Problems
 
-The UI is a single-page application served by Jinja2. It communicates with the backend exclusively via `fetch` and SSE.
+### Used ProcessPoolExecutor for extraction
 
-### Design System
-
-| Property | Value |
-|---|---|
-| Fonts | Syne (headings), Inter (body), JetBrains Mono (code/mono) |
-| Themes | Dark (default) + Light (localStorage persistence) |
-| CSS custom properties | 26 variables |
-| Animations | `fade-up`, `slide-in`, `orb-drift`, `bounce` (typing), `shimmer` (progress) |
-| Layout | Sidebar + main split, fully responsive |
-
-### Chat Features
-
-- **SSE streaming** — tokens appear as they generate; typing indicator stays visible until the first chunk arrives (no blank bubble flash)
-- **Typing stage indicator** — cycles through 5 status messages during retrieval and generation
-- **Markdown rendering** — `marked.js` with `highlight.js` (Tokyo Night Dark theme)  
-- **Image attachment** — base64-encoded, previewed inline, sent to Gemini for multimodal reasoning
-- **Message actions** — copy, thumbs up / thumbs down per message
-- **Auto-scroll lock** — stops auto-scrolling if the user scrolls up to read
-- **Send button state** — disabled until text is typed or image is attached
-
-### Upload Features
-
-- **Drag-and-drop** or click-to-browse file selection
-- **Multi-file queue** with per-file remove buttons
-- **Cancel button** to clear the queue
-- **Per-file status rows** — show ⏳ / ✅ / ❌ with chunk counts as each file completes
-- **Progress bar** with animated shimmer and live `%` counter
-- **Merged namespace display** — badge updates to the combined namespace after upload
-
-### Sidebar Features
-
-- **Namespace switcher** — click the namespace badge to open a dropdown of all Pinecone namespaces with vector counts and BM25 doc counts; click to switch
-- **Refresh button** — re-fetches namespace list from `/namespaces`
-- **Retrieval mode pills** — Hybrid / Dense / BM25; updates topbar label and description text
-- **Live stats chips** — message count, system boot time, last response latency (ms), total chunks stored
-- **Session history** — last 8 queries listed, click to re-ask
-- **Status indicator** — green dot (idle) / amber dot (processing)
-
----
-
-## Solve Problems (Design The Performance)
-
-### Why ProcessPoolExecutor for extraction?
-
-`RecursiveCharacterTextSplitter` and PyMuPDF are CPU-bound. Running them in the async event loop would block all other requests. Running them in a `ThreadPoolExecutor` gives no benefit because of the GIL. `ProcessPoolExecutor` gives true parallelism — a large `.md` file that previously blocked the event loop for ~52 seconds now completes in under 2 seconds.
+Because `RecursiveCharacterTextSplitter` and PyMuPDF are CPU-bound. Running them in the async event loop would block all other requests. Running them in a `ThreadPoolExecutor` gives no benefit because of the GIL. `ProcessPoolExecutor` gives true parallelism — a large `.md` file that blocked the event loop for ~52 seconds now completes in under 2 seconds.
 
 ### Why concurrent embedding batches?
 
@@ -555,7 +491,7 @@ for batch in batches:
 results = await asyncio.gather(*[embed(b) for b in batches])
 ```
 
-A 708-chunk document previously required 11 sequential HTTP calls (~8 seconds each = ~88 seconds). With `asyncio.gather`, all batches are in-flight simultaneously — limited only by the embedding service's throughput.
+Because a 708-chunk document required 11 sequential HTTP calls (~8 seconds each = ~88 seconds). With `asyncio.gather`, all batches are in-flight simultaneously — limited only by the embedding service's throughput.
 
 ### Why gRPC for Pinecone?
 
@@ -600,14 +536,6 @@ Transport:    gRPC (pool_threads=50)
 Upsert batch: 100 vectors per call
 Namespace:    per-document or merged multi-doc
 ```
-
-### BM25 — In-memory sparse index
-
-The BM25 index is a pure Python implementation with no external dependencies. It lives entirely in memory, meaning:
-
-- Query latency is microseconds (no network I/O)
-- It resets on process restart (documents must be re-uploaded or persisted separately)
-- Each namespace gets an independent `BM25Index` instance in the `_bm25_indexes` dict
 
 ---
 

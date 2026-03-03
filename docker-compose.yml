@@ -1,8 +1,6 @@
 services:
   embedding:
-    build:
-      context: ./embed_service_model
-      dockerfile: dockerfile
+    image: cppd86/embed_service:latest
     container_name: embedding_service
     ports:
       - "8000:8000"
@@ -10,10 +8,7 @@ services:
       - rag-network
 
   ragapp:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: rag_service:latest
+    image: cppd86/rag_service:latest
     container_name: rag_app
     ports:
       - "7000:7000"

@@ -1,5 +1,5 @@
 """
-modelapi.py  –  High-throughput embedding service
+modelapi.py  -  High-throughput embedding service
 Uses a multiprocessing-based worker pool so heavy CPU inference never
 blocks the async HTTP layer.  Each worker loads the model once at
 startup via initializer → zero cold-start per request.
