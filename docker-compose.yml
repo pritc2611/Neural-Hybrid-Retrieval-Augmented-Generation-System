@@ -1,8 +1,6 @@
 services:
   embedding:
     build:
-    context: Multi-Modal-RAG/embed_service_model
-
     context: ./embed_service_model
     dockerfile: dockerfile
     container_name: embedding_service
