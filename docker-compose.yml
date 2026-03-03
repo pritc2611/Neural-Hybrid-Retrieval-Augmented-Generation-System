@@ -1,11 +1,13 @@
 services:
   embedding:
     build:
-      context: Multi-Modal-RAG/embed_service_model
-      dockerfile: dockerfile
+    context: Multi-Modal-RAG/embed_service_model
+
+    context: ./embed_service_model
+    dockerfile: dockerfile
     container_name: embedding_service
     ports:
-      - "8000:8000"   
+      - "8000:8000"
     networks:
       - rag-network
 
@@ -16,7 +18,7 @@ services:
     image: rag_service:latest
     container_name: rag_app
     ports:
-      - "7000:7000"   
+      - "7000:7000"
     networks:
       - rag-network
     depends_on:

@@ -24,7 +24,11 @@ jobs:
 
       # Build embed service
       - name: Build embed_service image
+<<<<<<< HEAD
         run: docker build -t ${{ secrets.DOCKER_USERNAME }}/embed_service:latest Multi-Modal-RAG/embed_service_model
+=======
+        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/embed_service:latest ./embed_service_model
+>>>>>>> f0a4f00 (changes)
 
       - name: Push embed_service
         run: docker push ${{ secrets.DOCKER_USERNAME }}/embed_service:latest
@@ -34,4 +38,8 @@ jobs:
         run: docker build -t ${{ secrets.DOCKER_USERNAME }}/rag_service:latest .
 
       - name: Push rag_service
+<<<<<<< HEAD
         run: docker push ${{ secrets.DOCKER_USERNAME }}/rag_service:latest
+=======
+        run: docker push ${{ secrets.DOCKER_USERNAME }}/rag_service:latest
+>>>>>>> f0a4f00 (changes)

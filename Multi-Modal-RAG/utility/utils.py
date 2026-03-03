@@ -10,7 +10,6 @@ import traceback
 from contextlib import asynccontextmanager
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import List, Optional, Dict, Any, Tuple
-from langchain_huggingface import HuggingFacePipeline, HuggingFaceEndpoint
 import numpy as np
 from cachetools import TTLCache
 from dotenv import load_dotenv
@@ -27,7 +26,7 @@ MAX_HISTORY_CONTEXT = 6
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 100
 TOP_K_RETRIEVAL = 5
-EMBEDDING_BATCH_SIZE = 32  # smaller batches → faster per-request latency
+EMBEDDING_BATCH_SIZE = 32
 DENSE_WEIGHT = 0.6
 SPARSE_WEIGHT = 0.4
 
@@ -41,8 +40,9 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 REDIS_PASS = os.getenv("REDIS_PASS")
 
 # ── Global handles ────────────────────────────────────────────────────────────
-collection = None  # MongoDB collection
-mongo_client_g = None  # keep alive
+collection = None        # MongoDB conversations collection
+sessions_collection = None  # NEW: MongoDB sessions collection
+mongo_client_g = None
 redis_client = None
 embedding_client = None
 pc_index = None
@@ -52,9 +52,7 @@ final_chain = None
 current_namespace = "__default__"
 
 # ── Worker pools ──────────────────────────────────────────────────────────────
-# ProcessPoolExecutor for CPU-bound extraction (PDF + TXT/MD)
 _process_pool = ProcessPoolExecutor(max_workers=max(2, os.cpu_count() - 1))
-# ThreadPoolExecutor for I/O-bound BM25 ops + misc blocking calls
 _thread_pool = ThreadPoolExecutor(max_workers=16)
 
 # =============================================================================
@@ -74,7 +72,7 @@ def get_cache_key(question: str, context: str, namespace: str = "__default__") -
 # STORAGE INIT
 # =============================================================================
 def init_storage():
-    global collection, mongo_client_g, redis_client
+    global collection, sessions_collection, mongo_client_g, redis_client
     try:
         from pymongo import MongoClient, ASCENDING, DESCENDING
         from pymongo.server_api import ServerApi
@@ -84,6 +82,8 @@ def init_storage():
             MONGO_URL, server_api=ServerApi("1"), maxPoolSize=20, minPoolSize=2
         )
         db = mongo_client_g["chat-collection"]
+
+        # Conversations collection (messages)
         collection = db["conversations"]
         try:
             collection.create_index(
@@ -93,7 +93,25 @@ def init_storage():
             )
         except Exception:
             pass
-        print("✅ MongoDB connected")
+
+        # NEW: Sessions collection (metadata per session)
+        sessions_collection = db["sessions"]
+        try:
+            sessions_collection.create_index(
+                [("session_id", ASCENDING)],
+                name="session_id_idx",
+                unique=True,
+                background=True,
+            )
+            sessions_collection.create_index(
+                [("updated_at", DESCENDING)],
+                name="updated_at_idx",
+                background=True,
+            )
+        except Exception:
+            pass
+
+        print("✅ MongoDB connected (conversations + sessions)")
 
         redis_client = _redis.Redis(
             host=REDIS_HOST,
@@ -107,11 +125,139 @@ def init_storage():
     except Exception as e:
         print(f"⚠️ Storage init failed: {e}")
         collection = None
+        sessions_collection = None
         redis_client = None
 
 
 # =============================================================================
-# STORAGE HELPERS – Redis (fast cache) + MongoDB (persistent)
+# SESSION MANAGEMENT  (NEW)
+# =============================================================================
+
+def _create_session_sync(session_id: str, title: str = "New Chat") -> Dict:
+    """Create a session document in MongoDB if it doesn't already exist."""
+    if sessions_collection is None:
+        return {}
+    try:
+        now = time.time()
+        # upsert=True + $setOnInsert means: only write these fields on INSERT, never on UPDATE
+        result = sessions_collection.update_one(
+            {"session_id": session_id},
+            {
+                "$setOnInsert": {
+                    "session_id": session_id,
+                    "title": title,
+                    "created_at": now,
+                    "updated_at": now,
+                    "message_count": 0,
+                    "preview": "",
+                }
+            },
+            upsert=True,
+        )
+        return {"session_id": session_id, "created": result.upserted_id is not None}
+    except Exception as e:
+        print(f"⚠️ Session create failed: {e}")
+        return {}
+
+
+def _update_session_sync(session_id: str, user_message: str, assistant_preview: str):
+    """Update session metadata after a new exchange.  Upserts if missing."""
+    if sessions_collection is None:
+        return
+    try:
+        now = time.time()
+        # Build the title from the first user message (only when current title is still default)
+        new_title = (user_message[:45] + ("…" if len(user_message) > 45 else ""))
+
+        # Two-step: set title only if it is still the placeholder, then always update meta
+        sessions_collection.update_one(
+            {"session_id": session_id, "title": "New Chat"},
+            {"$set": {"title": new_title}},
+        )
+        sessions_collection.update_one(
+            {"session_id": session_id},
+            {
+                "$set": {
+                    "updated_at": now,
+                    "preview": assistant_preview[:80],
+                },
+                "$inc": {"message_count": 2},
+                # If the document doesn't exist at all yet, insert with defaults
+                "$setOnInsert": {
+                    "session_id": session_id,
+                    "title": new_title,
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        print(f"⚠️ Session update failed: {e}")
+
+
+def _get_all_sessions_sync(limit: int = 50) -> List[Dict]:
+    """Fetch all sessions ordered by most recently updated."""
+    if sessions_collection is None:
+        return []
+    try:
+        docs = list(
+            sessions_collection.find(
+                {},
+                {"_id": 0, "session_id": 1, "title": 1, "preview": 1,
+                 "updated_at": 1, "created_at": 1, "message_count": 1},
+            )
+            .sort("updated_at", -1)
+            .limit(limit)
+        )
+        return docs
+    except Exception as e:
+        print(f"⚠️ Get sessions failed: {e}")
+        return []
+
+
+def _delete_session_sync(session_id: str):
+    """Delete a session and all its messages from MongoDB + Redis."""
+    try:
+        if sessions_collection is not None:
+            sessions_collection.delete_one({"session_id": session_id})
+        if collection is not None:
+            collection.delete_many({"session_id": session_id})
+        if redis_client is not None:
+            redis_client.delete(f"chat:{session_id}")
+    except Exception as e:
+        print(f"⚠️ Delete session failed: {e}")
+
+
+def _rename_session_sync(session_id: str, new_title: str):
+    if sessions_collection is None:
+        return
+    try:
+        sessions_collection.update_one(
+            {"session_id": session_id},
+            {"$set": {"title": new_title[:60]}},
+        )
+    except Exception as e:
+        print(f"⚠️ Rename session failed: {e}")
+
+
+async def get_all_sessions(limit: int = 50) -> List[Dict]:
+    return await asyncio.to_thread(_get_all_sessions_sync, limit)
+
+
+async def create_session(session_id: str, title: str = "New Chat") -> Dict:
+    return await asyncio.to_thread(_create_session_sync, session_id, title)
+
+
+async def delete_session(session_id: str):
+    await asyncio.to_thread(_delete_session_sync, session_id)
+
+
+async def rename_session(session_id: str, new_title: str):
+    await asyncio.to_thread(_rename_session_sync, session_id, new_title)
+
+
+# =============================================================================
+# STORAGE HELPERS – Redis + MongoDB
 # =============================================================================
 @traceable(name="save msg to redis")
 def save_message_redis(session_id: str, role: str, content: str):
@@ -129,7 +275,6 @@ def save_message_redis(session_id: str, role: str, content: str):
 
 @traceable(name="save msg to mongodb")
 def save_message_mongo(session_id: str, role: str, content: str):
-    """Persist message to MongoDB for long-term history."""
     if collection is None:
         return
     try:
@@ -145,7 +290,7 @@ def save_message_mongo(session_id: str, role: str, content: str):
         print(f"⚠️ Mongo save failed: {e}")
 
 
-@traceable(name="geting msg from redis")
+@traceable(name="getting msg from redis")
 def get_short_memory(session_id: str) -> list:
     if redis_client is None:
         return []
@@ -156,9 +301,8 @@ def get_short_memory(session_id: str) -> list:
         return []
 
 
-@traceable(name="geting msg from mongo")
-def get_mongo_history(session_id: str, limit: int = 20) -> list:
-    """Fetch older conversation history from MongoDB."""
+@traceable(name="getting msg from mongo")
+def get_mongo_history(session_id: str, limit: int = 100) -> list:
     if collection is None:
         return []
     try:
@@ -167,21 +311,16 @@ def get_mongo_history(session_id: str, limit: int = 20) -> list:
                 {"session_id": session_id},
                 {"_id": 0, "role": 1, "content": 1, "timestamp": 1},
             )
-            .sort("timestamp", -1)
+            .sort("timestamp", 1)  # ascending for full history display
             .limit(limit)
         )
-        msgs.reverse()
         return msgs
     except Exception:
         return []
 
 
-@traceable(name="getting full converstation")
+@traceable(name="getting full conversation")
 async def get_conversation_context(session_id: str, include_mongo: bool = True) -> list:
-    """
-    Fast path: Redis only.
-    Full path: Redis recent + MongoDB older (deduplicated).
-    """
     recent = await asyncio.to_thread(get_short_memory, session_id)
 
     if not include_mongo or collection is None:
@@ -200,7 +339,12 @@ async def get_conversation_context(session_id: str, include_mongo: bool = True) 
         return recent[-MAX_HISTORY_CONTEXT:]
 
 
-@traceable(name="formating converstation")
+async def get_full_session_history(session_id: str) -> list:
+    """Fetch complete message history for a session (for UI display)."""
+    return await asyncio.to_thread(get_mongo_history, session_id, 500)
+
+
+@traceable(name="formatting conversation")
 def format_context_for_model(messages: list) -> str:
     if not messages:
         return ""
@@ -212,41 +356,32 @@ def format_context_for_model(messages: list) -> str:
 
 
 # =============================================================================
-# EMBEDDING CLIENT  –  concurrent batch dispatch + longer timeout
+# EMBEDDING CLIENT
 # =============================================================================
 class EmbeddingClient:
     def __init__(self, service_url: str):
         self.service_url = service_url.rstrip("/")
         self.session: Optional[aiohttp.ClientSession] = None
-        # ✅ FIX 2a: raise timeout so large batches don't abort
         self.timeout = aiohttp.ClientTimeout(total=120, connect=5)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
             connector = aiohttp.TCPConnector(
-                limit=200,
-                limit_per_host=100,
-                ttl_dns_cache=300,
-                keepalive_timeout=60,
+                limit=200, limit_per_host=100,
+                ttl_dns_cache=300, keepalive_timeout=60,
             )
             self.session = aiohttp.ClientSession(
-                connector=connector,
-                timeout=self.timeout,
+                connector=connector, timeout=self.timeout,
             )
         return self.session
 
     @traceable(name="call embedding")
-    async def embed(
-        self,
-        text: Optional[str] = None,
-        texts: Optional[List[str]] = None,
-    ) -> Any:
+    async def embed(self, text=None, texts=None) -> Any:
         if text and texts:
             raise ValueError("Provide either text or texts, not both")
         if not text and not texts:
             raise ValueError("Must provide text or texts")
 
-        # Single-text cache
         cache_key = None
         if text:
             cache_key = hashlib.md5(text.encode()).hexdigest()[:16]
@@ -268,11 +403,9 @@ class EmbeddingClient:
                 return embeddings
         except asyncio.TimeoutError:
             dim = 768
-            print("⚠️ Embedding timeout")
             return [[0.0] * dim for _ in texts] if texts else [0.0] * dim
         except Exception as e:
             dim = 768
-            print(f"⚠️ Embedding error: {e}")
             return [[0.0] * dim for _ in texts] if texts else [0.0] * dim
 
     async def close(self):
@@ -280,7 +413,6 @@ class EmbeddingClient:
             await self.session.close()
 
 
-# ── Type hint workaround ──────────────────────────────────────────────────────
 from typing import Any
 
 
@@ -339,7 +471,6 @@ class BM25Index:
 _bm25_indexes: Dict[str, BM25Index] = {}
 
 
-@traceable(name="geting bm25")
 def _get_bm25(namespace: str) -> BM25Index:
     if namespace not in _bm25_indexes:
         _bm25_indexes[namespace] = BM25Index()
@@ -357,7 +488,6 @@ def _update_bm25(namespace: str, docs: List[str], metadata: List[Dict]):
 # =============================================================================
 # RRF FUSION
 # =============================================================================
-@traceable(name="ranking on fusion vectors")
 def reciprocal_rank_fusion(
     dense_hits: List[Tuple[str, float, Dict]],
     sparse_hits: List[Tuple[str, float, Dict]],
@@ -379,13 +509,8 @@ def reciprocal_rank_fusion(
 # HYBRID RETRIEVER
 # =============================================================================
 class HybridPineconeRetriever:
-    def __init__(
-        self,
-        index,
-        emb_client: EmbeddingClient,
-        top_k: int = TOP_K_RETRIEVAL,
-        namespace: str = "__default__",
-    ):
+    def __init__(self, index, emb_client: EmbeddingClient,
+                 top_k: int = TOP_K_RETRIEVAL, namespace: str = "__default__"):
         self.index = index
         self.emb_client = emb_client
         self.top_k = top_k
@@ -394,18 +519,14 @@ class HybridPineconeRetriever:
     async def __call__(self, query: str, namespace: Optional[str] = None):
         return await self.get_relevant_documents(query, namespace)
 
-    @traceable(name="hybrid_retrieve")
     async def get_relevant_documents(self, query: str, namespace: Optional[str] = None):
         from langchain_core.documents import Document
-
         if not query or not query.strip():
             return []
         ns = namespace or current_namespace or self.default_namespace
         query = query.strip()
-        dense_task, sparse_task = (
-            asyncio.create_task(self._dense_search(query, ns)),
-            asyncio.create_task(self._sparse_search(query, ns)),
-        )
+        dense_task = asyncio.create_task(self._dense_search(query, ns))
+        sparse_task = asyncio.create_task(self._sparse_search(query, ns))
         dense_hits, sparse_hits = await asyncio.gather(dense_task, sparse_task)
         fused = reciprocal_rank_fusion(dense_hits, sparse_hits)[: self.top_k]
         docs, seen = [], set()
@@ -414,58 +535,34 @@ class HybridPineconeRetriever:
             if not text or text in seen:
                 continue
             seen.add(text)
-            docs.append(
-                Document(
-                    page_content=text,
-                    metadata={
-                        "score": score,
-                        "source": meta.get("source", "unknown"),
-                        "id": doc_id,
-                    },
-                )
-            )
-        print(
-            f"⚡ Hybrid: dense={len(dense_hits)}, bm25={len(sparse_hits)}, fused={len(docs)}, ns='{ns}'"
-        )
+            docs.append(Document(
+                page_content=text,
+                metadata={"score": score, "source": meta.get("source", "unknown"), "id": doc_id},
+            ))
         return docs
 
-    @traceable(name="dense serching")
-    async def _dense_search(
-        self, query: str, namespace: str
-    ) -> List[Tuple[str, float, Dict]]:
+    async def _dense_search(self, query: str, namespace: str) -> List[Tuple[str, float, Dict]]:
         try:
             vec = await self.emb_client.embed(text=query)
             result = await asyncio.wait_for(
                 asyncio.to_thread(
-                    self.index.query,
-                    vector=vec,
-                    top_k=self.top_k * 2,
-                    include_metadata=True,
-                    namespace=namespace,
+                    self.index.query, vector=vec, top_k=self.top_k * 2,
+                    include_metadata=True, namespace=namespace,
                 ),
                 timeout=8.0,
             )
-            return [
-                (m.id, m.score, m.metadata)
-                for m in result.matches
-                if m.metadata.get("text")
-            ]
+            return [(m.id, m.score, m.metadata) for m in result.matches if m.metadata.get("text")]
         except Exception as e:
             print(f"⚠️ Dense search error: {e}")
             return []
 
-    @traceable(name="sparse serching")
-    async def _sparse_search(
-        self, query: str, namespace: str
-    ) -> List[Tuple[str, float, Dict]]:
+    async def _sparse_search(self, query: str, namespace: str) -> List[Tuple[str, float, Dict]]:
         try:
             bm25 = _get_bm25(namespace)
             if not bm25.docs:
                 return []
             loop = asyncio.get_event_loop()
-            hits = await loop.run_in_executor(
-                _thread_pool, lambda: bm25.query(query, top_k=self.top_k * 2)
-            )
+            hits = await loop.run_in_executor(_thread_pool, lambda: bm25.query(query, top_k=self.top_k * 2))
             return [
                 (f"bm25-{idx}", score, {**bm25.metadata[idx], "text": bm25.docs[idx]})
                 for idx, score in hits
@@ -476,86 +573,47 @@ class HybridPineconeRetriever:
 
 
 # =============================================================================
-# DOCUMENT EXTRACTION  –  CPU-bound helpers (run in ProcessPoolExecutor)
+# DOCUMENT EXTRACTION
 # =============================================================================
-@traceable(name="extracting pdf")
 def _extract_pdf_worker(pdf_bytes: bytes, filename: str) -> List[Dict]:
-    """Run inside a worker process."""
     import pymupdf
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP,
         separators=["\n\n", "\n", ". ", " ", ""],
     )
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     full = "\n\n".join(p.get_text() for p in doc if p.get_text().strip())
-    return [
-        {"text": c, "source": filename, "chunk_id": i}
-        for i, c in enumerate(splitter.split_text(full))
-    ]
+    return [{"text": c, "source": filename, "chunk_id": i} for i, c in enumerate(splitter.split_text(full))]
 
 
 def _extract_text_worker(text: str, filename: str) -> List[Dict]:
-    """
-    ✅ FIX 1: Run in worker process (was blocking event loop ~52 s).
-    Plain-text / Markdown extraction via RecursiveCharacterTextSplitter.
-    """
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP,
         separators=["\n\n", "\n", ". ", " ", ""],
     )
-    return [
-        {"text": c, "source": filename, "chunk_id": i}
-        for i, c in enumerate(splitter.split_text(text))
-    ]
+    return [{"text": c, "source": filename, "chunk_id": i} for i, c in enumerate(splitter.split_text(text))]
 
 
 # =============================================================================
-# EMBEDDING  –  concurrent batch dispatch
+# EMBEDDING BATCHES
 # =============================================================================
-@traceable(name="embedding chunks")
 async def _embed_chunks_parallel(chunks: List[Dict]) -> List[Dict]:
-    """
-    ✅ FIX 2b: Fire all batches concurrently with asyncio.gather.
-    Previously sequential → O(n_batches) latency; now O(1) (all in parallel).
-    """
     texts = [c["text"] for c in chunks]
-
-    # Split into sub-batches
-    batches = [
-        texts[i : i + EMBEDDING_BATCH_SIZE]
-        for i in range(0, len(texts), EMBEDDING_BATCH_SIZE)
-    ]
-
+    batches = [texts[i: i + EMBEDDING_BATCH_SIZE] for i in range(0, len(texts), EMBEDDING_BATCH_SIZE)]
     t0 = time.time()
-    # Launch all batches simultaneously
-    results = await asyncio.gather(
-        *[embedding_client.embed(texts=b) for b in batches],
-        return_exceptions=True,
-    )
-    print(
-        f"  🔢 {len(texts)} chunks embedded in {time.time()-t0:.2f}s "
-        f"({len(batches)} concurrent batches)"
-    )
-
-    # Flatten results
+    results = await asyncio.gather(*[embedding_client.embed(texts=b) for b in batches], return_exceptions=True)
+    print(f"  🔢 {len(texts)} chunks embedded in {time.time()-t0:.2f}s ({len(batches)} concurrent batches)")
     all_embeddings: List[List[float]] = []
     for r in results:
         if isinstance(r, Exception):
-            print(f"⚠️ Batch error: {r}")
-            # pad with zeros so chunk count stays consistent
             for _ in range(EMBEDDING_BATCH_SIZE):
                 all_embeddings.append([0.0] * 768)
         elif isinstance(r[0], list):
             all_embeddings.extend(r)
         else:
             all_embeddings.append(r)
-
     for chunk, emb in zip(chunks, all_embeddings):
         chunk["embedding"] = emb
     return chunks
@@ -564,70 +622,42 @@ async def _embed_chunks_parallel(chunks: List[Dict]) -> List[Dict]:
 # =============================================================================
 # PINECONE UPSERT
 # =============================================================================
-@traceable(name="upserting to pinecone")
 async def _upsert_to_pinecone(chunks: List[Dict], namespace: str):
     vectors = [
         {
             "id": f"{namespace}-{c['source']}-{c['chunk_id']}",
             "values": c["embedding"],
-            "metadata": {
-                "text": c["text"],
-                "source": c["source"],
-                "chunk_id": c["chunk_id"],
-            },
+            "metadata": {"text": c["text"], "source": c["source"], "chunk_id": c["chunk_id"]},
         }
         for c in chunks
     ]
-    # Upsert batches of 100 concurrently
-    sub_batches = [vectors[i : i + 100] for i in range(0, len(vectors), 100)]
+    sub_batches = [vectors[i: i + 100] for i in range(0, len(vectors), 100)]
     await asyncio.gather(
-        *[
-            asyncio.to_thread(pc_index.upsert, vectors=sb, namespace=namespace)
-            for sb in sub_batches
-        ]
+        *[asyncio.to_thread(pc_index.upsert, vectors=sb, namespace=namespace) for sb in sub_batches]
     )
 
 
 # =============================================================================
-# SINGLE FILE UPLOAD
+# FILE UPLOAD
 # =============================================================================
-@traceable(name="extract_and_store")
-async def extract_and_store(
-    filename: str,
-    file_obj,
-    target_namespace: Optional[str] = None,  # if given, override auto-name
-) -> List[Dict]:
-    """
-    Extract → embed → store ONE document.
-    If target_namespace is set (multi-upload path) chunks go there;
-    otherwise namespace is derived from filename.
-    """
+async def extract_and_store(filename: str, file_obj, target_namespace: Optional[str] = None) -> List[Dict]:
     global current_namespace
     t0 = time.time()
     loop = asyncio.get_event_loop()
     print(f"📄 Processing: {filename}")
 
-    # ── Extract (always in subprocess) ───────────────────────────────────────
     if filename.lower().endswith(".pdf"):
         pdf_bytes = file_obj.file.read()
-        chunks = await loop.run_in_executor(
-            _process_pool, _extract_pdf_worker, pdf_bytes, filename
-        )
+        chunks = await loop.run_in_executor(_process_pool, _extract_pdf_worker, pdf_bytes, filename)
     elif filename.lower().endswith((".txt", ".md")):
         raw_text = file_obj.file.read().decode("utf-8")
-        # ✅ FIX 1: offload to process pool (was blocking ~52 s)
-        chunks = await loop.run_in_executor(
-            _process_pool, _extract_text_worker, raw_text, filename
-        )
+        chunks = await loop.run_in_executor(_process_pool, _extract_text_worker, raw_text, filename)
     else:
         raise ValueError(f"Unsupported: {filename}")
 
     print(f"  ✂️  {len(chunks)} chunks extracted ({time.time()-t0:.2f}s)")
-
-    # ── Embed (concurrent batches) ────────────────────────────────────────────
     chunks = await _embed_chunks_parallel(chunks)
 
-    # ── Namespace ─────────────────────────────────────────────────────────────
     if target_namespace:
         namespace = target_namespace
     else:
@@ -635,60 +665,28 @@ async def extract_and_store(
         namespace = re.sub(r"[^a-zA-Z0-9_-]", "_", name)[:63]
         current_namespace = namespace
 
-    # ── Dense store ───────────────────────────────────────────────────────────
     await _upsert_to_pinecone(chunks, namespace)
-
-    # ── Sparse store ──────────────────────────────────────────────────────────
     await loop.run_in_executor(
-        _thread_pool,
-        _update_bm25,
-        namespace,
+        _thread_pool, _update_bm25, namespace,
         [c["text"] for c in chunks],
         [{"source": c["source"], "chunk_id": c["chunk_id"]} for c in chunks],
     )
-
-    elapsed = time.time() - t0
-    print(f"✅ {len(chunks)} chunks → ns='{namespace}' ({elapsed:.2f}s)")
+    print(f"✅ {len(chunks)} chunks → ns='{namespace}' ({time.time()-t0:.2f}s)")
     return chunks
 
 
-# =============================================================================
-# MULTI-FILE UPLOAD  –  ✅ FIX 3: merged namespace
-# =============================================================================
-@traceable(name="extract_and_store_multiple")
 async def extract_and_store_multiple(files: List[Tuple[str, Any]]) -> Dict[str, Any]:
-    """
-    Upload several documents concurrently.
-
-    Namespace strategy:
-    • All chunks land in ONE combined namespace:
-        e.g. files [doc_a.pdf, doc_b.md]  → namespace 'doc_a__doc_b'
-    • This lets the retriever search across ALL uploaded files at once.
-    • current_namespace is updated to the combined name.
-    """
     global current_namespace
-
-    # Build combined namespace from all filenames
-    names = [
-        re.sub(r"[^a-zA-Z0-9_-]", "_", os.path.splitext(fn)[0])[:20] for fn, _ in files
-    ]
-    combined_ns = "__".join(names)[:63]  # Pinecone namespace max = 63 chars
+    names = [re.sub(r"[^a-zA-Z0-9_-]", "_", os.path.splitext(fn)[0])[:20] for fn, _ in files]
+    combined_ns = "__".join(names)[:63]
     current_namespace = combined_ns
-
     print(f"📦 Multi-upload → combined namespace: '{combined_ns}'")
-
-    # Process all files concurrently, all upserted to combined_ns
-    tasks = [
-        asyncio.create_task(extract_and_store(fn, fo, target_namespace=combined_ns))
-        for fn, fo in files
-    ]
+    tasks = [asyncio.create_task(extract_and_store(fn, fo, target_namespace=combined_ns)) for fn, fo in files]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-
     summary: Dict[str, Any] = {}
     for (fn, _), result in zip(files, results):
         if isinstance(result, Exception):
             summary[fn] = {"status": "error", "error": str(result)}
-            print(f"❌ {fn}: {result}")
         else:
             summary[fn] = {"status": "ok", "chunks": len(result)}
     return summary
@@ -697,13 +695,15 @@ async def extract_and_store_multiple(files: List[Tuple[str, Any]]) -> Dict[str, 
 # =============================================================================
 # LLM RESPONSE GENERATION
 # =============================================================================
-@traceable(name="generate_response")
 async def generate_response(
     question: str,
     session_id: str = "default",
     image_base64: Optional[str] = None,
 ):
-    """Streaming generator.  Saves to both Redis and MongoDB on completion."""
+    """Streaming generator. Saves to Redis, MongoDB, and updates session metadata."""
+    # Ensure session exists
+    await asyncio.to_thread(_create_session_sync, session_id)
+
     conv_history = await get_conversation_context(session_id, include_mongo=True)
     context_text = format_context_for_model(conv_history)
 
@@ -728,16 +728,14 @@ async def generate_response(
         if cache_key:
             query_cache[cache_key] = full_response
 
-        # ✅ FIX 4: persist to both Redis and MongoDB
+        # Persist messages
         save_message_redis(session_id, "user", question)
         save_message_redis(session_id, "assistant", full_response)
-        # Fire-and-forget to MongoDB (non-blocking)
-        # asyncio.get_event_loop().run_in_executor(
-        #     _thread_pool, save_message_mongo, session_id, "user",      question
-        # )
-        # asyncio.get_event_loop().run_in_executor(
-        #     _thread_pool, save_message_mongo, session_id, "assistant", full_response
-        # )
+        await asyncio.to_thread(save_message_mongo, session_id, "user", question)
+        await asyncio.to_thread(save_message_mongo, session_id, "assistant", full_response)
+
+        # Update session metadata
+        await asyncio.to_thread(_update_session_sync, session_id, question, full_response[:80])
 
     except Exception as e:
         print(f"❌ Generation error: {e}")
@@ -757,71 +755,53 @@ async def lifespan(app: FastAPI):
     print("🚀 HYBRID RAG SYSTEM STARTUP")
     print("=" * 70)
 
-    # 1. Storage
     init_storage()
 
-    # 2. Embedding client
     embedding_client = EmbeddingClient(EMBED_SERVICE_URL)
     import requests as _req
-
     try:
         h = _req.get(f"{EMBED_SERVICE_URL}/health", timeout=5)
         print(f"✅ Embedding service: {h.json()}")
     except Exception as e:
         print(f"⚠️ Embedding service unreachable: {e}")
 
-    # 3. Pinecone
     from pinecone.grpc import PineconeGRPC
-
     pc = PineconeGRPC(api_key=PINECONE_KEY, pool_threads=50, timeout=10)
     pc_index = pc.Index(RAG_INDEX)
     pc_retriever = HybridPineconeRetriever(
-        index=pc_index,
-        emb_client=embedding_client,
-        top_k=TOP_K_RETRIEVAL,
-        namespace="__default__",
+        index=pc_index, emb_client=embedding_client,
+        top_k=TOP_K_RETRIEVAL, namespace="__default__",
     )
     print("✅ Pinecone + Hybrid retriever ready")
 
-    # 4. LLM
+    from langchain_huggingface import ChatHuggingFace , HuggingFaceEndpoint
     chat_llm = HuggingFaceEndpoint(
         repo_id="deepseek-ai/DeepSeek-R1", huggingfacehub_api_token=HF_TOKEN
     )
-
     llm = ChatHuggingFace(llm=chat_llm)
     print("✅ LLM ready")
 
-    # 5. RAG chain
     from langchain_core.runnables import RunnableParallel, RunnableLambda
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """You are a helpful AI assistant with access to document context.
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are a helpful AI assistant with access to document context.
 
 RULES:
 - Use context when relevant; otherwise don't answer this question.
 - Be direct, accurate, and concise.
 - Cite source filenames when referencing context.
-- If an image is described, incorporate it into your answer.""",
-            ),
-            (
-                "user",
-                """Context:\n{rag_context}
+- If an image is described, incorporate it into your answer."""),
+        ("user", """Context:\n{rag_context}
 
 Conversation history:\n{chat_history}
 
 Question: {question}
 
-Answer:""",
-            ),
-        ]
-    )
+Answer:"""),
+    ])
 
-    @traceable(name="async_retrieve", run_type="retriever")
     async def async_retrieve(inp: dict) -> str:
         docs = await pc_retriever.get_relevant_documents(inp.get("question", ""))
         if not docs:
@@ -829,13 +809,11 @@ Answer:""",
         return "\n\n".join(d.page_content for d in docs)
 
     final_chain = (
-        RunnableParallel(
-            {
-                "rag_context": RunnableLambda(async_retrieve),
-                "chat_history": lambda x: x.get("chat_history", ""),
-                "question": lambda x: x.get("question", ""),
-            }
-        )
+        RunnableParallel({
+            "rag_context": RunnableLambda(async_retrieve),
+            "chat_history": lambda x: x.get("chat_history", ""),
+            "question": lambda x: x.get("question", ""),
+        })
         | prompt
         | llm
         | StrOutputParser()
@@ -846,7 +824,7 @@ Answer:""",
     app.state.startup_time = elapsed
     print(f"\n✅ SYSTEM READY in {elapsed:.2f}s\n" + "=" * 70)
 
-    yield  # ← app runs here
+    yield
 
     print("\n🛑 Shutting down…")
     if embedding_client:
