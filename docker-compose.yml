@@ -1,13 +1,11 @@
-version: "3.9"
-
 services:
   embedding:
     build:
-      context: embed_service_model/dockerfile
-      dockerfile: Dockerfile
+      context: ./embed_service_model
+      dockerfile: dockerfile
     container_name: embedding_service
     ports:
-      - "8000:8000"   
+      - "8000:8000"
     networks:
       - rag-network
 
@@ -18,7 +16,7 @@ services:
     image: rag_service:latest
     container_name: rag_app
     ports:
-      - "7000:7000"   
+      - "7000:7000"
     networks:
       - rag-network
     depends_on:
