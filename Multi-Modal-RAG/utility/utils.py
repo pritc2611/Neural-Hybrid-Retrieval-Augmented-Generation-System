@@ -40,8 +40,8 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 REDIS_PASS = os.getenv("REDIS_PASS")
 
 # ── Global handles ────────────────────────────────────────────────────────────
-collection = None        # MongoDB conversations collection
-sessions_collection = None  # NEW: MongoDB sessions collection
+collection = None        # MongoDB conversations collection (optional fallback)
+sessions_collection = None  # MongoDB sessions collection (optional fallback)
 mongo_client_g = None
 redis_client = None
 embedding_client = None
@@ -133,82 +133,107 @@ def init_storage():
 # SESSION MANAGEMENT  (NEW)
 # =============================================================================
 
+def _session_meta_key(session_id: str) -> str:
+    return f"session:{session_id}:meta"
+
+
+def _session_messages_key(session_id: str) -> str:
+    return f"chat:{session_id}:messages"
+
+
+SESSIONS_INDEX_KEY = "sessions:index"
+
 def _create_session_sync(session_id: str, title: str = "New Chat") -> Dict:
-    """Create a session document in MongoDB if it doesn't already exist."""
-    if sessions_collection is None:
+    """Create a session in Redis if it doesn't already exist."""
+    if redis_client is None:
         return {}
     try:
         now = time.time()
-        # upsert=True + $setOnInsert means: only write these fields on INSERT, never on UPDATE
-        result = sessions_collection.update_one(
-            {"session_id": session_id},
-            {
-                "$setOnInsert": {
+        meta_key = _session_meta_key(session_id)
+        created = False
+
+        if not redis_client.exists(meta_key):
+            redis_client.hset(
+                meta_key,
+                mapping={
                     "session_id": session_id,
                     "title": title,
                     "created_at": now,
                     "updated_at": now,
                     "message_count": 0,
                     "preview": "",
-                }
-            },
-            upsert=True,
-        )
-        return {"session_id": session_id, "created": result.upserted_id is not None}
+                },
+            )
+            created = True
+
+        updated_at = float(redis_client.hget(meta_key, "updated_at") or now)
+        redis_client.zadd(SESSIONS_INDEX_KEY, {session_id: updated_at})
+        return {"session_id": session_id, "created": created}
     except Exception as e:
         print(f"⚠️ Session create failed: {e}")
         return {}
 
 
 def _update_session_sync(session_id: str, user_message: str, assistant_preview: str):
-    """Update session metadata after a new exchange.  Upserts if missing."""
-    if sessions_collection is None:
+    """Update Redis session metadata after a new exchange."""
+    if redis_client is None:
         return
     try:
         now = time.time()
-        # Build the title from the first user message (only when current title is still default)
-        new_title = (user_message[:45] + ("…" if len(user_message) > 45 else ""))
+        meta_key = _session_meta_key(session_id)
+        new_title = user_message[:45] + ("…" if len(user_message) > 45 else "")
 
-        # Two-step: set title only if it is still the placeholder, then always update meta
-        sessions_collection.update_one(
-            {"session_id": session_id, "title": "New Chat"},
-            {"$set": {"title": new_title}},
-        )
-        sessions_collection.update_one(
-            {"session_id": session_id},
-            {
-                "$set": {
-                    "updated_at": now,
-                    "preview": assistant_preview[:80],
-                },
-                "$inc": {"message_count": 2},
-                # If the document doesn't exist at all yet, insert with defaults
-                "$setOnInsert": {
+        if not redis_client.exists(meta_key):
+            redis_client.hset(
+                meta_key,
+                mapping={
                     "session_id": session_id,
                     "title": new_title,
                     "created_at": now,
+                    "updated_at": now,
+                    "message_count": 0,
+                    "preview": "",
                 },
-            },
-            upsert=True,
-        )
+            )
+
+        current_title = redis_client.hget(meta_key, "title") or "New Chat"
+        updates: Dict[str, Any] = {
+            "updated_at": now,
+            "preview": assistant_preview[:80],
+        }
+        if current_title == "New Chat":
+            updates["title"] = new_title
+
+        message_count = int(redis_client.hget(meta_key, "message_count") or 0) + 2
+        updates["message_count"] = message_count
+
+        redis_client.hset(meta_key, mapping=updates)
+        redis_client.zadd(SESSIONS_INDEX_KEY, {session_id: now})
     except Exception as e:
         print(f"⚠️ Session update failed: {e}")
 
 
 def _get_all_sessions_sync(limit: int = 50) -> List[Dict]:
-    """Fetch all sessions ordered by most recently updated."""
-    if sessions_collection is None:
+    """Fetch all sessions from Redis ordered by most recently updated."""
+    if redis_client is None:
         return []
     try:
-        docs = list(
-            sessions_collection.find(
-                {},
-                {"_id": 0, "session_id": 1, "title": 1, "preview": 1,
-                 "updated_at": 1, "created_at": 1, "message_count": 1},
+        session_ids = redis_client.zrevrange(SESSIONS_INDEX_KEY, 0, max(0, limit - 1))
+        docs: List[Dict[str, Any]] = []
+        for sid in session_ids:
+            meta = redis_client.hgetall(_session_meta_key(sid))
+            if not meta:
+                continue
+            docs.append(
+                {
+                    "session_id": sid,
+                    "title": meta.get("title", "New Chat"),
+                    "preview": meta.get("preview", ""),
+                    "updated_at": float(meta.get("updated_at", 0) or 0),
+                    "created_at": float(meta.get("created_at", 0) or 0),
+                    "message_count": int(meta.get("message_count", 0) or 0),
+                }
             )
-            .sort("updated_at", -1)
-            .limit(limit)
-        )
         return docs
     except Exception as e:
         print(f"⚠️ Get sessions failed: {e}")
@@ -216,26 +241,35 @@ def _get_all_sessions_sync(limit: int = 50) -> List[Dict]:
 
 
 def _delete_session_sync(session_id: str):
-    """Delete a session and all its messages from MongoDB + Redis."""
+    """Delete a session and all its messages from Redis (+ optional Mongo fallback)."""
     try:
+        if redis_client is not None:
+            redis_client.delete(_session_messages_key(session_id))
+            redis_client.delete(_session_meta_key(session_id))
+            redis_client.zrem(SESSIONS_INDEX_KEY, session_id)
         if sessions_collection is not None:
             sessions_collection.delete_one({"session_id": session_id})
         if collection is not None:
             collection.delete_many({"session_id": session_id})
-        if redis_client is not None:
-            redis_client.delete(f"chat:{session_id}")
     except Exception as e:
         print(f"⚠️ Delete session failed: {e}")
 
 
 def _rename_session_sync(session_id: str, new_title: str):
-    if sessions_collection is None:
+    if redis_client is None and sessions_collection is None:
         return
     try:
-        sessions_collection.update_one(
-            {"session_id": session_id},
-            {"$set": {"title": new_title[:60]}},
-        )
+        if redis_client is not None:
+            meta_key = _session_meta_key(session_id)
+            if redis_client.exists(meta_key):
+                redis_client.hset(meta_key, "title", new_title[:60])
+                updated_at = float(redis_client.hget(meta_key, "updated_at") or time.time())
+                redis_client.zadd(SESSIONS_INDEX_KEY, {session_id: updated_at})
+        if sessions_collection is not None:
+            sessions_collection.update_one(
+                {"session_id": session_id},
+                {"$set": {"title": new_title[:60]}},
+            )
     except Exception as e:
         print(f"⚠️ Rename session failed: {e}")
 
@@ -264,11 +298,12 @@ def save_message_redis(session_id: str, role: str, content: str):
     if redis_client is None:
         return
     try:
-        key = f"chat:{session_id}"
-        msg = json.dumps({"role": role, "content": content[:1000]})
+        key = _session_messages_key(session_id)
+        msg = json.dumps({"role": role, "content": content, "timestamp": time.time()})
         redis_client.rpush(key, msg)
-        redis_client.ltrim(key, -MAX_SHORT_MEMORY, -1)
-        redis_client.expire(key, 86400)
+        # Keep enough history for per-session chat replay in UI.
+        redis_client.ltrim(key, -2000, -1)
+        redis_client.expire(key, 60 * 60 * 24 * 30)
     except Exception:
         pass
 
@@ -295,8 +330,8 @@ def get_short_memory(session_id: str) -> list:
     if redis_client is None:
         return []
     try:
-        key = f"chat:{session_id}"
-        return [json.loads(m) for m in redis_client.lrange(key, 0, -1)]
+        key = _session_messages_key(session_id)
+        return [json.loads(m) for m in redis_client.lrange(key, -MAX_SHORT_MEMORY, -1)]
     except Exception:
         return []
 
@@ -322,26 +357,22 @@ def get_mongo_history(session_id: str, limit: int = 100) -> list:
 @traceable(name="getting full conversation")
 async def get_conversation_context(session_id: str, include_mongo: bool = True) -> list:
     recent = await asyncio.to_thread(get_short_memory, session_id)
-
-    if not include_mongo or collection is None:
-        return recent[-MAX_HISTORY_CONTEXT:]
-
-    try:
-        older = await asyncio.to_thread(get_mongo_history, session_id, 30)
-        redis_set = {(m["role"], m["content"]) for m in recent}
-        merged = []
-        for msg in older:
-            if (msg["role"], msg["content"]) not in redis_set:
-                merged.append(msg)
-        merged.extend(recent)
-        return merged[-MAX_HISTORY_CONTEXT:]
-    except Exception:
-        return recent[-MAX_HISTORY_CONTEXT:]
+    return recent[-MAX_HISTORY_CONTEXT:]
 
 
 async def get_full_session_history(session_id: str) -> list:
-    """Fetch complete message history for a session (for UI display)."""
-    return await asyncio.to_thread(get_mongo_history, session_id, 500)
+    """Fetch complete message history for a session from Redis (for UI display)."""
+    if redis_client is None:
+        return []
+    try:
+        msgs = await asyncio.to_thread(redis_client.lrange, _session_messages_key(session_id), 0, -1)
+        parsed = [json.loads(m) for m in msgs]
+        return [
+            {"role": m.get("role", "assistant"), "content": m.get("content", ""), "timestamp": m.get("timestamp", 0)}
+            for m in parsed
+        ]
+    except Exception:
+        return []
 
 
 @traceable(name="formatting conversation")
@@ -731,8 +762,7 @@ async def generate_response(
         # Persist messages
         save_message_redis(session_id, "user", question)
         save_message_redis(session_id, "assistant", full_response)
-        await asyncio.to_thread(save_message_mongo, session_id, "user", question)
-        await asyncio.to_thread(save_message_mongo, session_id, "assistant", full_response)
+        # Mongo persistence kept optional; Redis is the source of truth for session replay.
 
         # Update session metadata
         await asyncio.to_thread(_update_session_sync, session_id, question, full_response[:80])

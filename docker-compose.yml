@@ -1,8 +1,8 @@
 services:
   embedding:
     build:
-    context: ./embed_service_model
-    dockerfile: dockerfile
+      context: ./embed_service_model
+      dockerfile: dockerfile
     container_name: embedding_service
     ports:
       - "8000:8000"
