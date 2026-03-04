@@ -1,9 +1,10 @@
 """
-retrieval.py — BM25 sparse index, HybridPineconeRetriever, RRF fusion.
+retriver.py — BM25 sparse index, HybridPineconeRetriever, RRF fusion.
 """
 import re
 import math
 import asyncio
+import time
 from typing import List, Dict, Tuple, Optional
 import numpy as np
 from langsmith import traceable
@@ -30,7 +31,7 @@ class BM25Index:
     @staticmethod
     def tokenize(text: str) -> List[str]:
         return re.findall(r"\b\w+\b", text.lower())
-    
+
     def build(self, docs: List[str], metadata: List[Dict]):
         self.docs     = docs
         self.metadata = metadata
@@ -47,6 +48,7 @@ class BM25Index:
                 df[t] = df.get(t, 0) + 1
         N = len(docs)
         self._idf = {t: math.log((N - n + 0.5) / (n + 0.5) + 1) for t, n in df.items()}
+
     def query(self, q: str, top_k: int = 10) -> List[Tuple[int, float]]:
         if not self.docs:
             return []
@@ -74,22 +76,26 @@ def _get_bm25(namespace: str) -> BM25Index:
     return _bm25_indexes[namespace]
 
 
+@traceable(name="bm25_update_index")
 def _update_bm25(namespace: str, docs: List[str], metadata: List[Dict]):
+    t0 = time.perf_counter()
     idx      = _get_bm25(namespace)
     all_docs = idx.docs + docs
     all_meta = idx.metadata + metadata
     idx.build(all_docs, all_meta)
-    print(f"✅ BM25 updated: ns='{namespace}', total={len(all_docs)}")
+    print(f"[bm25_update_index] {(time.perf_counter()-t0)*1000:.1f} ms  ns={namespace}  total={len(all_docs)}")
 
 
 # =============================================================================
 # RRF FUSION
 # =============================================================================
+@traceable(name="rrf_fusion")
 def reciprocal_rank_fusion(
     dense_hits:  List[Tuple[str, float, Dict]],
     sparse_hits: List[Tuple[str, float, Dict]],
     k: int = 60,
 ) -> List[Tuple[str, float, Dict]]:
+    t0 = time.perf_counter()
     cfg = _get_cfg()
     scores:   Dict[str, float] = {}
     meta_map: Dict[str, Dict]  = {}
@@ -99,7 +105,9 @@ def reciprocal_rank_fusion(
     for rank, (doc_id, _, meta) in enumerate(sparse_hits):
         scores[doc_id]   = scores.get(doc_id, 0.0) + cfg.SPARSE_WEIGHT / (k + rank + 1)
         meta_map[doc_id] = meta
-    return [(did, sc, meta_map[did]) for did, sc in sorted(scores.items(), key=lambda x: -x[1])]
+    result = [(did, sc, meta_map[did]) for did, sc in sorted(scores.items(), key=lambda x: -x[1])]
+    print(f"[rrf_fusion] {(time.perf_counter()-t0)*1000:.1f} ms  dense={len(dense_hits)}  sparse={len(sparse_hits)}  fused={len(result)}")
+    return result
 
 
 # =============================================================================
@@ -114,7 +122,8 @@ class HybridPineconeRetriever:
 
     async def __call__(self, query: str, namespace: Optional[str] = None):
         return await self.get_relevant_documents(query, namespace)
-    @traceable(name="getting relevent documents")
+
+    @traceable(name="hybrid_get_relevant_documents")
     async def get_relevant_documents(self, query: str, namespace: Optional[str] = None):
         from langchain_core.documents import Document
         cfg = _get_cfg()
@@ -124,12 +133,15 @@ class HybridPineconeRetriever:
         ns    = namespace or cfg.current_namespace or self.default_namespace
         query = query.strip()
 
+        t0 = time.perf_counter()
         dense_hits, sparse_hits = await asyncio.gather(
             self._dense_search(query, ns),
             self._sparse_search(query, ns),
         )
+        print(f"[dense+sparse parallel] {(time.perf_counter()-t0)*1000:.1f} ms  dense={len(dense_hits)}  sparse={len(sparse_hits)}")
 
         fused = reciprocal_rank_fusion(dense_hits, sparse_hits)[: self.top_k]
+
         docs, seen = [], set()
         for doc_id, score, meta in fused:
             text = meta.get("text", "")
@@ -142,10 +154,15 @@ class HybridPineconeRetriever:
             ))
         return docs
 
+    @traceable(name="pinecone_dense_search")
     async def _dense_search(self, query: str, namespace: str) -> List[Tuple[str, float, Dict]]:
         cfg = _get_cfg()
         try:
-            vec    = await self.emb_client.embed(text=query)
+            t0 = time.perf_counter()
+            vec = await self.emb_client.embed(text=query)
+            print(f"[dense embed query] {(time.perf_counter()-t0)*1000:.1f} ms")
+
+            t1 = time.perf_counter()
             result = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.index.query,
@@ -154,25 +171,30 @@ class HybridPineconeRetriever:
                 ),
                 timeout=8.0,
             )
+            print(f"[pinecone_query] {(time.perf_counter()-t1)*1000:.1f} ms  matches={len(result.matches)}")
             return [(m.id, m.score, m.metadata) for m in result.matches if m.metadata.get("text")]
         except Exception as e:
-            print(f"⚠️  Dense search error: {e}")
+            print(f"Dense search error: {e}")
             return []
 
+    @traceable(name="bm25_sparse_search")
     async def _sparse_search(self, query: str, namespace: str) -> List[Tuple[str, float, Dict]]:
         cfg = _get_cfg()
         try:
+            t0 = time.perf_counter()
             bm25 = _get_bm25(namespace)
             if not bm25.docs:
+                print(f"[bm25_sparse] EMPTY index for ns={namespace}")
                 return []
             hits = await asyncio.get_event_loop().run_in_executor(
                 cfg._thread_pool,
                 lambda: bm25.query(query, top_k=self.top_k * 2),
             )
+            print(f"[bm25_sparse_search] {(time.perf_counter()-t0)*1000:.1f} ms  hits={len(hits)}")
             return [
                 (f"bm25-{idx}", score, {**bm25.metadata[idx], "text": bm25.docs[idx]})
                 for idx, score in hits
             ]
         except Exception as e:
-            print(f"⚠️  BM25 search error: {e}")
+            print(f"BM25 search error: {e}")
             return []

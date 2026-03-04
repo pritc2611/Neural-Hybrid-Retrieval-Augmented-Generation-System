@@ -3,6 +3,7 @@ embedding.py — Async HTTP client for the embedding microservice.
 """
 import hashlib
 import asyncio
+import time
 from typing import Any, List, Optional, Union
 import aiohttp
 from langsmith import traceable
@@ -32,8 +33,8 @@ class EmbeddingClient:
             )
             self.session = aiohttp.ClientSession(connector=connector, timeout=self.timeout)
         return self.session
-    
-    @traceable(name="creating embeddings")
+
+    @traceable(name="embed_http_request")
     async def embed(self, text=None, texts=None) -> Any:
         if text and texts:
             raise ValueError("Provide either text or texts, not both")
@@ -41,25 +42,41 @@ class EmbeddingClient:
             raise ValueError("Must provide text or texts")
 
         cfg = _get_cfg()
+
+        # --- cache check ---
         cache_key = None
         if text:
+            t0 = time.perf_counter()
             cache_key = hashlib.md5(text.encode()).hexdigest()[:16]
             if cache_key in cfg.embedding_cache:
+                print(f"⏱  [embed cache HIT]           {(time.perf_counter()-t0)*1000:.1f} ms")
                 return cfg.embedding_cache[cache_key]
+            print(f"⏱  [embed cache MISS build key] {(time.perf_counter()-t0)*1000:.1f} ms")
 
+        # --- HTTP to embedding service ---
         payload = {"text": texts if texts else text}
+        t0 = time.perf_counter()
         session = await self._get_session()
+        t1 = time.perf_counter()
+        print(f"⏱  [embed get_session]          {(t1-t0)*1000:.1f} ms")
+
         try:
+            t_http = time.perf_counter()
             async with session.post(f"{self.service_url}/embed", json=payload) as resp:
                 resp.raise_for_status()
                 result = await resp.json()
-                if "embeddings" not in result:
-                    raise RuntimeError(f"Invalid response: {result}")
-                embeddings = result["embeddings"]
-                if cache_key:
-                    cfg.embedding_cache[cache_key] = embeddings
-                return embeddings
-        except Exception:
+                print(f"⏱  [embed HTTP POST + parse]   {(time.perf_counter()-t_http)*1000:.1f} ms")
+
+            if "embeddings" not in result:
+                raise RuntimeError(f"Invalid response: {result}")
+            embeddings = result["embeddings"]
+
+            if cache_key:
+                cfg.embedding_cache[cache_key] = embeddings
+            return embeddings
+
+        except Exception as e:
+            print(f"   Embedding HTTP error: {e}")
             dim = 768
             return [[0.0] * dim for _ in texts] if texts else [0.0] * dim
 

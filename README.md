@@ -315,6 +315,37 @@ Namespace updated → current_namespace
   Summary: { filename: { status, chunks } }
 ```
 
+
+## Reduce Letency Problems Using Asynchronous Programing
+
+### Used ProcessPoolExecutor for extraction
+
+Because `RecursiveCharacterTextSplitter` and PyMuPDF are CPU-bound. Running them in the async event loop would block all other requests. Running them in a `ThreadPoolExecutor` gives no benefit because of the GIL. `ProcessPoolExecutor` gives true parallelism — a large `.md` file that blocked the event loop for ~52 seconds now completes in under 2 seconds.
+
+### Why concurrent embedding batches?
+
+The original implementation embedded batches sequentially:
+
+```python
+# Before: sequential — O(n_batches) latency
+for batch in batches:
+    embs = await embed(batch)  # wait for each one
+
+# After: concurrent — O(1) latency regardless of batch count
+results = await asyncio.gather(*[embed(b) for b in batches])
+```
+
+Because a 708-chunk document required 11 sequential HTTP calls (~8 seconds each = ~88 seconds). With `asyncio.gather`, all batches are in-flight simultaneously — limited only by the embedding service's throughput.
+
+### Why gRPC for Pinecone?
+
+`pinecone-client[grpc]` uses HTTP/2 multiplexing and binary serialization. For vector upserts and queries, this is measurably faster than the REST client, especially when batching 100-vector upserts concurrently.
+
+### Why separate embedding service?
+
+The embedding model (~270MB for e5-base-v2) is loaded once per process, shared across all requests. Running it in the same process as FastAPI would block startup and compete for memory. The separate service also allows independent scaling — you can run multiple embedding service replicas behind a load balancer without touching the RAG application.
+
+
 ---
 
 ## API Reference
@@ -472,34 +503,6 @@ neural-rag/
 
 ---
 
-## Design The Performance With Asynchronous Programing To Solve Letency Problems
-
-### Used ProcessPoolExecutor for extraction
-
-Because `RecursiveCharacterTextSplitter` and PyMuPDF are CPU-bound. Running them in the async event loop would block all other requests. Running them in a `ThreadPoolExecutor` gives no benefit because of the GIL. `ProcessPoolExecutor` gives true parallelism — a large `.md` file that blocked the event loop for ~52 seconds now completes in under 2 seconds.
-
-### Why concurrent embedding batches?
-
-The original implementation embedded batches sequentially:
-
-```python
-# Before: sequential — O(n_batches) latency
-for batch in batches:
-    embs = await embed(batch)  # wait for each one
-
-# After: concurrent — O(1) latency regardless of batch count
-results = await asyncio.gather(*[embed(b) for b in batches])
-```
-
-Because a 708-chunk document required 11 sequential HTTP calls (~8 seconds each = ~88 seconds). With `asyncio.gather`, all batches are in-flight simultaneously — limited only by the embedding service's throughput.
-
-### Why gRPC for Pinecone?
-
-`pinecone-client[grpc]` uses HTTP/2 multiplexing and binary serialization. For vector upserts and queries, this is measurably faster than the REST client, especially when batching 100-vector upserts concurrently.
-
-### Why separate embedding service?
-
-The embedding model (~270MB for e5-base-v2) is loaded once per process, shared across all requests. Running it in the same process as FastAPI would block startup and compete for memory. The separate service also allows independent scaling — you can run multiple embedding service replicas behind a load balancer without touching the RAG application.
 
 ---
 

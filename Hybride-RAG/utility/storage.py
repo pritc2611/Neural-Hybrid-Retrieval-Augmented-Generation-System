@@ -52,17 +52,17 @@ def init_storage():
         except Exception:
             pass
 
-        print("✅ MongoDB connected (conversations + sessions)")
+        print("   MongoDB connected (conversations + sessions)")
 
         cfg.redis_client = _redis.Redis(
             host=cfg.REDIS_HOST, port=17564,
             decode_responses=True, username="default", password=cfg.REDIS_PASS,
         )
         cfg.redis_client.ping()
-        print("✅ Redis connected")
+        print("   Redis connected")
 
     except Exception as e:
-        print(f"⚠️  Storage init failed: {e}")
+        print(f"   Storage init failed: {e}")
         cfg.collection = None
         cfg.sessions_collection = None
         cfg.redis_client = None
@@ -78,13 +78,15 @@ def _session_messages_key(session_id: str) -> str: return f"chat:{session_id}:me
 
 
 # =============================================================================
-# SESSION CRUD
+# SESSION CRUD — sync (run via asyncio.to_thread)
 # =============================================================================
+@traceable(name="redis_create_session_sync")
 def _create_session_sync(session_id: str, title: str = "New Chat") -> Dict:
     cfg = _get_cfg()
     if cfg.redis_client is None:
         return {}
     try:
+        t0 = time.perf_counter()
         now = time.time()
         meta_key = _session_meta_key(session_id)
         created = False
@@ -97,20 +99,23 @@ def _create_session_sync(session_id: str, title: str = "New Chat") -> Dict:
             created = True
         updated_at = float(cfg.redis_client.hget(meta_key, "updated_at") or now)
         cfg.redis_client.zadd(SESSIONS_INDEX_KEY, {session_id: updated_at})
+        print(f"⏱  [_create_session_sync redis ops] {(time.perf_counter()-t0)*1000:.1f} ms  created={created}")
         return {"session_id": session_id, "created": created}
     except Exception as e:
-        print(f"⚠️  Session create failed: {e}")
+        print(f"   Session create failed: {e}")
         return {}
 
 
+@traceable(name="redis_update_session_sync")
 def _update_session_sync(session_id: str, user_message: str, assistant_preview: str):
     cfg = _get_cfg()
     if cfg.redis_client is None:
         return
     try:
+        t0 = time.perf_counter()
         now = time.time()
         meta_key  = _session_meta_key(session_id)
-        new_title = user_message[:45] + ("…" if len(user_message) > 45 else "")
+        new_title = user_message[:45] + ("..." if len(user_message) > 45 else "")
         if not cfg.redis_client.exists(meta_key):
             cfg.redis_client.hset(meta_key, mapping={
                 "session_id": session_id, "title": new_title,
@@ -124,15 +129,18 @@ def _update_session_sync(session_id: str, user_message: str, assistant_preview: 
         updates["message_count"] = int(cfg.redis_client.hget(meta_key, "message_count") or 0) + 2
         cfg.redis_client.hset(meta_key, mapping=updates)
         cfg.redis_client.zadd(SESSIONS_INDEX_KEY, {session_id: now})
+        print(f"⏱  [_update_session_sync redis ops] {(time.perf_counter()-t0)*1000:.1f} ms")
     except Exception as e:
-        print(f"⚠️  Session update failed: {e}")
+        print(f"   Session update failed: {e}")
 
 
+@traceable(name="redis_get_all_sessions_sync")
 def _get_all_sessions_sync(limit: int = 50) -> List[Dict]:
     cfg = _get_cfg()
     if cfg.redis_client is None:
         return []
     try:
+        t0 = time.perf_counter()
         session_ids = cfg.redis_client.zrevrange(SESSIONS_INDEX_KEY, 0, max(0, limit - 1))
         docs = []
         for sid in session_ids:
@@ -147,15 +155,18 @@ def _get_all_sessions_sync(limit: int = 50) -> List[Dict]:
                 "created_at":    float(meta.get("created_at", 0) or 0),
                 "message_count": int(meta.get("message_count", 0) or 0),
             })
+        print(f"⏱  [_get_all_sessions_sync] {(time.perf_counter()-t0)*1000:.1f} ms  count={len(docs)}")
         return docs
     except Exception as e:
-        print(f"⚠️  Get sessions failed: {e}")
+        print(f"   Get sessions failed: {e}")
         return []
 
 
+@traceable(name="redis_delete_session_sync")
 def _delete_session_sync(session_id: str):
     cfg = _get_cfg()
     try:
+        t0 = time.perf_counter()
         if cfg.redis_client is not None:
             cfg.redis_client.delete(_session_messages_key(session_id))
             cfg.redis_client.delete(_session_meta_key(session_id))
@@ -164,13 +175,16 @@ def _delete_session_sync(session_id: str):
             cfg.sessions_collection.delete_one({"session_id": session_id})
         if cfg.collection is not None:
             cfg.collection.delete_many({"session_id": session_id})
+        print(f"⏱  [_delete_session_sync] {(time.perf_counter()-t0)*1000:.1f} ms")
     except Exception as e:
-        print(f"⚠️  Delete session failed: {e}")
+        print(f"   Delete session failed: {e}")
 
 
+@traceable(name="redis_rename_session_sync")
 def _rename_session_sync(session_id: str, new_title: str):
     cfg = _get_cfg()
     try:
+        t0 = time.perf_counter()
         if cfg.redis_client is not None:
             meta_key = _session_meta_key(session_id)
             if cfg.redis_client.exists(meta_key):
@@ -181,104 +195,134 @@ def _rename_session_sync(session_id: str, new_title: str):
             cfg.sessions_collection.update_one(
                 {"session_id": session_id}, {"$set": {"title": new_title[:60]}},
             )
+        print(f"⏱  [_rename_session_sync] {(time.perf_counter()-t0)*1000:.1f} ms")
     except Exception as e:
-        print(f"⚠️  Rename session failed: {e}")
+        print(f"   Rename session failed: {e}")
 
 
 # =============================================================================
 # ASYNC SESSION API
 # =============================================================================
-async def get_all_sessions(limit: int = 50)                    -> List[Dict]: return await asyncio.to_thread(_get_all_sessions_sync, limit)
-async def create_session(session_id: str, title: str = "New Chat") -> Dict:  return await asyncio.to_thread(_create_session_sync, session_id, title)
-async def delete_session(session_id: str):                             await asyncio.to_thread(_delete_session_sync, session_id)
-async def rename_session(session_id: str, new_title: str):             await asyncio.to_thread(_rename_session_sync, session_id, new_title)
+@traceable(name="get_all_sessions")
+async def get_all_sessions(limit: int = 50) -> List[Dict]:
+    return await asyncio.to_thread(_get_all_sessions_sync, limit)
+
+@traceable(name="create_session")
+async def create_session(session_id: str, title: str = "New Chat") -> Dict:
+    return await asyncio.to_thread(_create_session_sync, session_id, title)
+
+@traceable(name="delete_session")
+async def delete_session(session_id: str):
+    await asyncio.to_thread(_delete_session_sync, session_id)
+
+@traceable(name="rename_session")
+async def rename_session(session_id: str, new_title: str):
+    await asyncio.to_thread(_rename_session_sync, session_id, new_title)
 
 
 # =============================================================================
 # MESSAGE PERSISTENCE
 # =============================================================================
-@traceable(name="save msg to redis")
+@traceable(name="save_message_redis")
 def save_message_redis(session_id: str, role: str, content: str):
     cfg = _get_cfg()
     if cfg.redis_client is None:
         return
     try:
+        t0 = time.perf_counter()
         key = _session_messages_key(session_id)
         msg = json.dumps({"role": role, "content": content, "timestamp": time.time()})
         cfg.redis_client.rpush(key, msg)
         cfg.redis_client.ltrim(key, -2000, -1)
         cfg.redis_client.expire(key, 60 * 60 * 24 * 30)
+        print(f"⏱  [save_message_redis {role}] {(time.perf_counter()-t0)*1000:.1f} ms")
     except Exception:
         pass
 
 
-@traceable(name="save msg to mongodb")
+@traceable(name="save_message_mongo")
 def save_message_mongo(session_id: str, role: str, content: str):
     cfg = _get_cfg()
     if cfg.collection is None:
         return
     try:
+        t0 = time.perf_counter()
         cfg.collection.insert_one({
             "session_id": session_id, "role": role,
             "content": content, "timestamp": time.time(),
         })
+        print(f"⏱  [save_message_mongo {role}] {(time.perf_counter()-t0)*1000:.1f} ms")
     except Exception as e:
-        print(f"⚠️  Mongo save failed: {e}")
+        print(f"   Mongo save failed: {e}")
 
 
 # =============================================================================
 # MESSAGE RETRIEVAL
 # =============================================================================
-@traceable(name="getting msg from redis")
+@traceable(name="get_short_memory_redis")
 def get_short_memory(session_id: str) -> list:
     cfg = _get_cfg()
     if cfg.redis_client is None:
         return []
     try:
+        t0 = time.perf_counter()
         key = _session_messages_key(session_id)
-        return [json.loads(m) for m in cfg.redis_client.lrange(key, -cfg.MAX_SHORT_MEMORY, -1)]
+        result = [json.loads(m) for m in cfg.redis_client.lrange(key, -cfg.MAX_SHORT_MEMORY, -1)]
+        print(f"⏱  [get_short_memory_redis] {(time.perf_counter()-t0)*1000:.1f} ms  msgs={len(result)}")
+        return result
     except Exception:
         return []
 
 
-@traceable(name="getting msg from mongo")
+@traceable(name="get_mongo_history")
 def get_mongo_history(session_id: str, limit: int = 100) -> list:
     cfg = _get_cfg()
     if cfg.collection is None:
         return []
     try:
-        return list(
+        t0 = time.perf_counter()
+        result = list(
             cfg.collection.find(
                 {"session_id": session_id},
                 {"_id": 0, "role": 1, "content": 1, "timestamp": 1},
             ).sort("timestamp", 1).limit(limit)
         )
+        print(f"⏱  [get_mongo_history] {(time.perf_counter()-t0)*1000:.1f} ms  msgs={len(result)}")
+        return result
     except Exception:
         return []
 
 
-@traceable(name="getting full conversation")
+@traceable(name="get_conversation_context")
 async def get_conversation_context(session_id: str, include_mongo: bool = True) -> list:
+    t0 = time.perf_counter()
     recent = await asyncio.to_thread(get_short_memory, session_id)
-    return recent[-_get_cfg().MAX_HISTORY_CONTEXT:]
+    result = recent[-_get_cfg().MAX_HISTORY_CONTEXT:]
+    print(f"⏱  [get_conversation_context TOTAL] {(time.perf_counter()-t0)*1000:.1f} ms  msgs={len(result)}")
+    return result
 
 
+@traceable(name="get_full_session_history")
 async def get_full_session_history(session_id: str) -> list:
     cfg = _get_cfg()
     if cfg.redis_client is None:
         return []
     try:
+        t0 = time.perf_counter()
         msgs = await asyncio.to_thread(
             cfg.redis_client.lrange, _session_messages_key(session_id), 0, -1,
         )
-        return [
+        result = [
             {"role": m.get("role", "assistant"), "content": m.get("content", ""), "timestamp": m.get("timestamp", 0)}
             for m in [json.loads(x) for x in msgs]
         ]
+        print(f"⏱  [get_full_session_history] {(time.perf_counter()-t0)*1000:.1f} ms  msgs={len(result)}")
+        return result
     except Exception:
         return []
 
 
+@traceable(name="format_context_for_model")
 def format_context_for_model(messages: list) -> str:
     if not messages:
         return ""
