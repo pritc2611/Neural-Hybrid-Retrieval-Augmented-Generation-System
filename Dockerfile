@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy only requirements first for caching
-COPY Multi-Modal-RAG/requirements.txt .
+COPY Hybride-RAG/requirements.txt .
 
 # Install dependencies into /install
 RUN pip install --prefix=/dependencies -r requirements.txt \
