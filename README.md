@@ -30,11 +30,8 @@ and a dark-themed glassmorphism UI.**
 - [Environment Variables](#environment-variables)
 - [Project Structure](#project-structure)
 - [Frontend Features](#frontend-features)
-- [Performance Design](#performance-design)
 - [Storage Layer](#storage-layer)
 - [Known Limitations](#known-limitations)
-- [Roadmap](#roadmap)
-
 ---
 
 ## Overview

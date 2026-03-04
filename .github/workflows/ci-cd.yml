@@ -24,7 +24,7 @@ jobs:
 
       # Build embed service
       - name: Build embed_service image
-        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/embed_service:latest Multi-Modal-RAG/embed_service_model
+        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/embed_service:latest Hybride-RAG/embed_service_model
 
       - name: Push embed_service
         run: docker push ${{ secrets.DOCKER_USERNAME }}/embed_service:latest
