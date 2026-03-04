@@ -1,39 +1,42 @@
+# --- Stage 1: Build Stage ---
 FROM python:3.10-slim AS builder
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PIP_NO_CACHE_DIR=1
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# Build dependencies
+# Install build dependencies (needed for numpy/transformers if wheels aren't available)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    libjpeg-dev \
-    zlib1g-dev \
- && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (cache-friendly)
-COPY requirments.txt .
+COPY requirements.txt .
 
-# Install Python deps
-RUN pip install --prefix=/dependencies -r requirments.txt
+# Create venv and install dependencies
+# We install torch first from the CPU index to ensure it doesn't pull the GPU version later
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --upgrade pip && \
+    /opt/venv/bin/pip install -r requirements.txt
 
-
+# --- Stage 2: Runtime Stage ---
 FROM python:3.10-slim
 
+# Create a non-root user
+RUN useradd -m appuser
 WORKDIR /app
 
-# Copy installed Python packages
-COPY --from=builder /dependencies /usr/local
-
-ENV PATH=/usr/local/bin:$PATH
+# Copy the venv from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy app code
-COPY embed_service.py .
-COPY .env .
+COPY --chown=appuser:appuser embed_service.py .
+# If you use a .env file, uncomment the next line, or better yet, pass env vars at runtime
+# COPY --chown=appuser:appuser .env .
 
+USER appuser
 
 EXPOSE 8000
 

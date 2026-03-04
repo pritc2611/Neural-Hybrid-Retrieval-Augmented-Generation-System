@@ -13,8 +13,6 @@ from pathlib import Path
 from typing import Optional, List, Union
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
-
-import torch
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -25,6 +23,7 @@ load_dotenv()
 # CONFIG
 # =============================================================================
 MODEL_NAME = os.getenv("EMBED_MODEL")
+HF_TOKEN = os.getenv("HF_TOKEN")
 NUM_WORKERS = max(2, (os.cpu_count() or 4) // 2)  # half cores for embedding
 BATCH_SIZE = 32  # per-worker batch
 
@@ -41,7 +40,7 @@ def _worker_init():
     global _worker_model
     from sentence_transformers import SentenceTransformer
 
-    _worker_model = SentenceTransformer(MODEL_NAME)
+    _worker_model = SentenceTransformer(MODEL_NAME,token=HF_TOKEN)
     # Workers are CPU-only (GPU is shared by the main process if available)
     _worker_model = _worker_model.to("cpu")
     # Warm up
@@ -110,16 +109,6 @@ async def root():
         "dim": EMBED_DIM,
         "workers": NUM_WORKERS,
         "status": "ready",
-    }
-
-
-@app.get("/health")
-async def health():
-    return {
-        "status": "healthy",
-        "model": MODEL_NAME,
-        "dim": EMBED_DIM,
-        "workers": NUM_WORKERS,
     }
 
 

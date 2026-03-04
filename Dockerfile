@@ -32,12 +32,11 @@ COPY --from=builder /dependencies /usr/local
 ENV PATH=/usr/local/bin:$PATH
 
 # 🔹 Copy app last
-COPY  Hybride-RAG/static/  .
-COPY Hybride-RAG/templates .
-COPY Hybride-RAG/utility .
+COPY  Hybride-RAG/static/  static
+COPY Hybride-RAG/templates templates
+COPY Hybride-RAG/utility utility
 COPY Hybride-RAG/app/app.py .
- COPY Hybride-RAG/.env .
 
 EXPOSE 7000
 
-CMD ["uvicorn", "app.app:app", "--host", "0.0.0.0", "--port", "7000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7000"]

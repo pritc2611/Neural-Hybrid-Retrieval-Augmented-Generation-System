@@ -6,4 +6,5 @@ model/
 *__pycache__
 model
 README.md
-*.env.example
+app.env
+.env.example

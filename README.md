@@ -426,7 +426,7 @@ SPARSE_WEIGHT        = 0.4
 
 ```bash
 git clone https://github.com/pritc2611/Neural-Hybrid-Retrieval-Augmented-Generation-System
-cd neural-rag
+cd Hybride-RAG
 
 pip install -r requirements.txt
 

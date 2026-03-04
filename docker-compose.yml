@@ -1,17 +1,28 @@
 services:
   embedding:
+    build:
+      context: ./Hybride-RAG/embed_service_model
+      dockerfile: dockerfile
     image: cppd86/embed_service:latest
     container_name: embedding_service
     ports:
       - "8000:8000"
+    env_file:
+      -  ./Hybride-RAG/embed_service_model/embed_service_example.env
     networks:
       - rag-network
 
   ragapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: cppd86/rag_service:latest
     container_name: rag_app
     ports:
       - "7000:7000"
+    env_file:
+      - ./Hybride-RAG/.env.example
+    restart: always
     networks:
       - rag-network
     depends_on:

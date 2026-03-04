@@ -173,7 +173,7 @@ async def lifespan(app: FastAPI):
 
     cfg.embedding_client = EmbeddingClient(cfg.EMBED_SERVICE_URL)
     try:
-        h = _req.get(f"{cfg.EMBED_SERVICE_URL}/health", timeout=5)
+        h = _req.get(f"{cfg.EMBED_SERVICE_URL}/", timeout=5)
         print(f"   Embedding service: {h.json()}")
     except Exception as e:
         print(f"   Embedding service unreachable: {e}")
