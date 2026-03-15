@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name("embed_service.env"))
 
 # =============================================================================
 # CONFIG

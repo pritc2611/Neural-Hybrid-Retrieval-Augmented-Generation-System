@@ -58,14 +58,18 @@ async def _embed_chunks_parallel(chunks: List[Dict]) -> List[Dict]:
     print(f"  🔢 {len(texts)} chunks embedded in {time.time()-t0:.2f}s ({len(batches)} batches)")
 
     all_embeddings: List[List[float]] = []
-    for r in results:
+    for batch, r in zip(batches, results):
         if isinstance(r, Exception):
-            for _ in range(cfg.EMBEDDING_BATCH_SIZE):
+            print(f"  ⚠️ Batch embedding failed ({len(batch)} texts): {r}")
+            for _ in range(len(batch)):
                 all_embeddings.append([0.0] * 768)
-        elif isinstance(r[0], list):
+        elif isinstance(r, list) and len(r) > 0 and isinstance(r[0], list):
             all_embeddings.extend(r)
         else:
             all_embeddings.append(r)
+
+    if len(all_embeddings) != len(chunks):
+        print(f"  ⚠️ Embedding count mismatch: {len(all_embeddings)} embeddings vs {len(chunks)} chunks")
 
     for chunk, emb in zip(chunks, all_embeddings):
         chunk["embedding"] = emb
