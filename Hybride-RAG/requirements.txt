@@ -21,3 +21,8 @@ langsmith
 pypdf
 pymupdf
 transformers
+fastapi
+uvicorn
+requests
+supervisor
+langchain_nvidia_ai_endpoints

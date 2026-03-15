@@ -28,6 +28,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 REDIS_HOST = os.getenv("REDIS_HOST")
 HF_TOKEN = os.getenv("HF_TOKEN")
 REDIS_PASS = os.getenv("REDIS_PASS")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
 # Global handles (populated at lifespan startup)
 collection = None

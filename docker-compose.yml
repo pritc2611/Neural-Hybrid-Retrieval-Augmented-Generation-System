@@ -1,27 +1,42 @@
 services:
   embedding:
-    build:
-      context: ./Hybride-RAG/embed_service_model
-      dockerfile: dockerfile
+    # build:
+    #   context: ./Hybride-RAG/embed_service_model
+    #   dockerfile: dockerfile
     image: cppd86/embed_service:latest
     container_name: embedding_service
     ports:
       - "8000:8000"
-    env_file:
-      -  ./Hybride-RAG/embed_service_model/embed_service_example.env
+    environment:
+      - EMBED_MODEL = "intfloat/e5-base-v2"
+      - LANGSMITH_TRACING=true
+      - LANGSMITH_ENDPOINT="https://api.smith.langchain.com"
+      - LANGSMITH_API_KEY="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"
+      - LANGSMITH_PROJECT="Embedding-service"
+      - HF_TOKEN = "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"
+
     networks:
       - rag-network
 
   ragapp:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: cppd86/rag_service:latest
     container_name: rag_app
     ports:
       - "7000:7000"
-    env_file:
-      - ./Hybride-RAG/.env.example
+    environment:
+      - HF_TOKEN = "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"
+      - PINECONE_API_KEY = "pcsk_6avKXd_6UsGaHo6QUi1k2d5wfjckonpGJVM29EKU8umoErjVEsd4JTo3yFmuFJ8hENUE1e"
+      - MONGO_URL = "mongodb+srv://pc_db_mongo:sO2a9Wixo3elwUas@pc-rag-db.xkrgaem.mongodb.net/?appName=pc-rag-db"
+      - GOOGLE_API_KEY="AIzaSyCqdNDekkVz5pDABTxOl-KlX7uOGWikjHU"
+      - EMBED_SERVICE_URL = "http://embedding:8000"
+      - REDIS_HOST = "redis-17564.crce206.ap-south-1-1.ec2.cloud.redislabs.com"
+      - REDIS_PASS = "pVmARALu4PlbWIYVCMTATY2wF7kDd7B8"
+      - LANGSMITH_TRACING=true
+      - LANGSMITH_ENDPOINT="https://api.smith.langchain.com"
+      - LANGSMITH_API_KEY="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"
+      - LANGSMITH_PROJECT="Hybride-RAG-5.0"
+      - RAG_INDEX = "hybride-retrival-db"
+      - LLM_NAME = "openai/gpt-oss-20b"
     restart: always
     networks:
       - rag-network

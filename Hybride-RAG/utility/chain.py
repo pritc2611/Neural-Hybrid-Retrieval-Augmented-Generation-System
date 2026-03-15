@@ -6,7 +6,7 @@ import traceback
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
-
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from fastapi import FastAPI
 import requests as _req
 from dotenv import load_dotenv
@@ -187,13 +187,14 @@ async def lifespan(app: FastAPI):
     )
     print("   Pinecone + Hybrid retriever ready")
 
-    from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
-    chat_llm = HuggingFaceEndpoint(
-        repo_id=LLM_NAME,
-        huggingfacehub_api_token=cfg.HF_TOKEN,
-    )
-    cfg.llm = ChatHuggingFace(llm=chat_llm)
-    print("   LLM ready")
+    Chat_llm = ChatNVIDIA(
+        model="mistralai/devstral-2-123b-instruct-2512",
+        api_key=cfg.NVIDIA_API_KEY, 
+        temperature=0.9,
+        top_p=0.95,
+        max_completion_tokens=8192,)
+    cfg.llm = Chat_llm
+    print("LLM ready")
 
     from langchain_core.runnables      import RunnableParallel, RunnableLambda
     from langchain_core.output_parsers  import StrOutputParser
