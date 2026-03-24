@@ -41,11 +41,15 @@ ALLOWED = (".pdf", ".txt", ".md")
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     import utility.config as cfg
-    return templates.TemplateResponse("index.html", {
-        "request":      request,
-        "startup_time": f"{getattr(request.app.state, 'startup_time', 0):.2f}s",
-        "namespace":    cfg.current_namespace,
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "request":      request,
+            "startup_time": f"{getattr(request.app.state, 'startup_time', 0):.2f}s",
+            "namespace":    cfg.current_namespace,
+        },
+    )
 
 
 
