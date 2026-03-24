@@ -76,16 +76,6 @@ def _get_bm25(namespace: str) -> BM25Index:
     return _bm25_indexes[namespace]
 
 
-@traceable(name="bm25_update_index")
-def _update_bm25(namespace: str, docs: List[str], metadata: List[Dict]):
-    t0 = time.perf_counter()
-    idx      = _get_bm25(namespace)
-    all_docs = idx.docs + docs
-    all_meta = idx.metadata + metadata
-    idx.build(all_docs, all_meta)
-    print(f"[bm25_update_index] {(time.perf_counter()-t0)*1000:.1f} ms  ns={namespace}  total={len(all_docs)}")
-
-
 # =============================================================================
 # RRF FUSION
 # =============================================================================
