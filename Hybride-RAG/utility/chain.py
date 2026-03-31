@@ -203,10 +203,10 @@ async def lifespan(app: FastAPI):
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a helpful AI assistant with access to document context.
 
-RULES:
+STRICT RULES:
 - Use context when relevant; otherwise don't answer this question.
 - Be direct, accurate, and concise.
-- Cite source filenames when referencing context.
+- COMPALSORY Cite source filenames when referencing context.
 - If an image is described, incorporate it into your answer."""),
         ("user", "Context:\n{rag_context}\n\nConversation history:\n{chat_history}\n\nQuestion: {question}\n\nAnswer:"),
     ])
