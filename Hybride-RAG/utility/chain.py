@@ -66,7 +66,7 @@ async def _persist_messages(
     full_response: str,
     cache_key: Optional[str],
 ):
-    from utility.storage import save_message_redis, _update_session_sync
+    from utility.storage import save_message_redis, _update_session_sync , save_message_mongo
     cfg = _get_cfg()
 
     t0 = time.perf_counter()
@@ -78,12 +78,22 @@ async def _persist_messages(
     print(f"⏱  [save_message_redis assistant]  {(time.perf_counter()-t1)*1000:.1f} ms")
 
     t2 = time.perf_counter()
+    save_message_mongo(session_id, "user", question)
+    print(f"⏱  [save_message_mongo user]  {(time.perf_counter()-t1)*1000:.1f} ms")
+
+
+    t3 = time.perf_counter()
+    save_message_mongo(session_id, "assistant", full_response)
+    print(f"⏱  [save_message_mongo assistant]  {(time.perf_counter()-t1)*1000:.1f} ms")
+
+
+    t2 = time.perf_counter()
     await asyncio.to_thread(_update_session_sync, session_id, question, full_response[:80])
     print(f"⏱  [_update_session_sync]           {(time.perf_counter()-t2)*1000:.1f} ms")
 
     if cache_key:
         cfg.query_cache[cache_key] = full_response
-        print(f"⏱  [cache_write] key={cache_key[:12]}...")
+        print(f"⏱  [cache_writed] key={cache_key[:12]}...")
 
 
 # =============================================================================
@@ -188,7 +198,7 @@ async def lifespan(app: FastAPI):
     print("   Pinecone + Hybrid retriever ready")
 
     Chat_llm = ChatNVIDIA(
-        model="mistralai/devstral-2-123b-instruct-2512",
+        model=LLM_NAME,
         api_key=cfg.NVIDIA_API_KEY, 
         temperature=0.9,
         top_p=0.95,
