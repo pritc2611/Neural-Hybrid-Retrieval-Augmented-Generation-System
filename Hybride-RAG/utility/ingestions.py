@@ -41,6 +41,16 @@ def _extract_text_worker(text: str, filename: str) -> List[Dict]:
     return [{"text": c, "source": filename, "chunk_id": i}
             for i, c in enumerate(splitter.split_text(text))]
 
+def _extract_md_worker(text: str, filename: str) -> List[Dict]:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    import utility.config as cfg
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=512, chunk_overlap=200,
+        separators=["\n\n"],
+    )
+    return [{"text": c, "source": filename, "chunk_id": i}
+            for i, c in enumerate(splitter.split_text(text))]
+
 
 # =============================================================================
 # PARALLEL EMBEDDING
@@ -132,7 +142,7 @@ async def extract_and_store(
         texts = UnstructuredMarkdownLoader(temp_path).load()
         full_text = "\n".join([doc.page_content for doc in texts])
 
-        chunks  = await loop.run_in_executor(cfg._process_pool , _extract_text_worker , full_text , filename)
+        chunks  = await loop.run_in_executor(cfg._process_pool , _extract_md_worker , full_text , filename)
         os.remove(temp_path)
 
     else:

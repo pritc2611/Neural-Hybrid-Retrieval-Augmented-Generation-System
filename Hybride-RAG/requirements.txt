@@ -27,3 +27,5 @@ requests
 supervisor
 langchain_nvidia_ai_endpoints
 unstructured
+unstructured[all-docs]
+unstructured[md]
