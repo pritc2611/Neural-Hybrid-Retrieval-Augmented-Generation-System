@@ -115,11 +115,26 @@ async def extract_and_store(
         chunks = await loop.run_in_executor(
             cfg._process_pool, _extract_pdf_worker, pdf_bytes, filename,
         )
-    elif filename.lower().endswith((".txt", ".md")):
+    elif filename.lower().endswith(".txt"):
         raw_text = file_obj.file.read().decode("utf-8")
         chunks = await loop.run_in_executor(
             cfg._process_pool, _extract_text_worker, raw_text, filename,
         )
+    elif filename.lower().endswith((".md")):
+        from langchain_community.document_loaders import UnstructuredMarkdownLoader
+        import tempfile
+        content = file_obj.file.read()
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".md") as tmp:
+            tmp.write(content)
+            temp_path = tmp.name
+
+        texts = UnstructuredMarkdownLoader(temp_path).load()
+        full_text = "\n".join([doc.page_content for doc in texts])
+
+        chunks  = await loop.run_in_executor(cfg._process_pool , _extract_text_worker , full_text , filename)
+        os.remove(temp_path)
+
     else:
         raise ValueError(f"Unsupported file type: {filename}")
 
