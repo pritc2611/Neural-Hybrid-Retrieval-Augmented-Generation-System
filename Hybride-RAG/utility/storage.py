@@ -118,7 +118,7 @@ def _create_session_sync(session_id: str, title: str = "New Chat") -> Dict:
                 upsert=True,
                 )
             
-            created_mongo = result.upserted_id is not None 
+        created_mongo = result.upserted_id is not None 
 
         print(f"⏱  [_create_session_sync redis ops] {(time.perf_counter()-t0)*1000:.1f} ms  created={created} , created_mongo={created_mongo}")
         return {"session_id": session_id, "created": created}
